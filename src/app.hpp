@@ -2,6 +2,8 @@
 
 #include <SDL2/SDL.h>
 
+#include "framebuffer.hpp"
+
 class App {
 public:
     bool init(int width, int height);
@@ -12,9 +14,13 @@ private:
     void handleEvents();
     void update(double dt);
     void render();
+    void drawPlaceholderGlows();
 
     SDL_Window*   m_window   = nullptr;
     SDL_Renderer* m_renderer = nullptr;
+    SDL_Texture*  m_texture  = nullptr;
+
+    Framebuffer m_framebuffer;
 
     int    m_width   = 0;
     int    m_height  = 0;
