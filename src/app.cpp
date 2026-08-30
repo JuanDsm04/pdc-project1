@@ -39,6 +39,12 @@ const Glow kGlows[6] = {
 
 constexpr float kGlowWorldRadius = 0.16f;
 
+// Stands in for the --particles flag until the CLI lands at step 15.
+constexpr int      kDefaultParticleCount = 200000;
+constexpr uint32_t kDefaultSeed = 1337u;
+
+constexpr float kParticleBrightness = 0.9f;
+
 // Distance the orbits are tuned around. Attenuation is expressed relative to it so that
 // glows read as receding without the near ones saturating the whole frame.
 constexpr float kReferenceDepth = 3.2f;
@@ -78,6 +84,7 @@ bool App::init(int width, int height) {
 
     m_framebuffer.resize(m_width, m_height);
     m_camera.setViewport(m_width, m_height);
+    m_particles.reset(kDefaultParticleCount, kDefaultSeed);
 
     m_running = true;
     return true;
@@ -126,6 +133,26 @@ void App::handleEvents() {
 void App::update(double dt) {
     m_time += dt;
     m_camera.update(m_time);
+    m_particles.integrate(static_cast<float>(dt));
+}
+
+// One pixel per particle for now. Step 6 replaces this with a gaussian splat whose radius
+// comes from the projected scale.
+void App::drawParticles() {
+    const int count = m_particles.count();
+
+    for (int i = 0; i < count; ++i) {
+        const Projected p =
+            m_camera.project({m_particles.px[i], m_particles.py[i], m_particles.pz[i]});
+        if (!p.visible) continue;
+
+        const float ratio = kReferenceDepth / p.depth;
+        const float intensity = kParticleBrightness * ratio * ratio;
+
+        m_framebuffer.deposit(static_cast<int>(p.x), static_cast<int>(p.y),
+                              m_particles.cr[i] * intensity, m_particles.cg[i] * intensity,
+                              m_particles.cb[i] * intensity);
+    }
 }
 
 // Stand in for the particle splatting that arrives at step 6. Six HDR blobs on world
@@ -169,6 +196,7 @@ void App::drawPlaceholderGlows() {
 
 void App::render() {
     m_framebuffer.clear();
+    drawParticles();
     drawPlaceholderGlows();
     m_framebuffer.tonemap(kExposure);
 

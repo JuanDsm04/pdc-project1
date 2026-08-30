@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
 struct Vec3 {
     float x = 0.0f;
@@ -31,3 +32,27 @@ inline Vec3 normalize(Vec3 v) {
     const float len = length(v);
     return len > 0.0f ? v * (1.0f / len) : Vec3{};
 }
+
+// Randomness is derived by hashing an index rather than advancing a shared generator.
+// A stateless hash lets any thread produce particle i's values without coordinating with
+// the others, and it makes a run reproducible from its seed alone, which is what allows
+// the sequential and parallel modes to be compared frame for frame.
+inline uint32_t hashU32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+inline uint32_t hashCombine(uint32_t a, uint32_t b) {
+    return hashU32(a ^ (b * 0x9e3779b9U));
+}
+
+// Uses the top bits, which are the best mixed, and lands in [0,1).
+inline float randomFloat(uint32_t h) {
+    return static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
+}
+
+inline float randomSigned(uint32_t h) { return randomFloat(h) * 2.0f - 1.0f; }

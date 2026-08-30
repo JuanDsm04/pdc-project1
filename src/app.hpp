@@ -4,6 +4,7 @@
 
 #include "camera.hpp"
 #include "framebuffer.hpp"
+#include "particles.hpp"
 
 class App {
 public:
@@ -15,14 +16,16 @@ private:
     void handleEvents();
     void update(double dt);
     void render();
+    void drawParticles();
     void drawPlaceholderGlows();
 
     SDL_Window*   m_window   = nullptr;
     SDL_Renderer* m_renderer = nullptr;
     SDL_Texture*  m_texture  = nullptr;
 
-    Framebuffer m_framebuffer;
-    Camera      m_camera;
+    Framebuffer    m_framebuffer;
+    Camera         m_camera;
+    ParticleSystem m_particles;
 
     int    m_width   = 0;
     int    m_height  = 0;
