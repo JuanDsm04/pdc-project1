@@ -1,5 +1,7 @@
 #include "particles.hpp"
 
+#include "parallel.hpp"
+
 namespace {
 
 constexpr float kPi = 3.14159265f;
@@ -70,7 +72,11 @@ void ParticleSystem::reset(int count, uint32_t seed) {
     }
 }
 
+// Every iteration only reads and writes its own index, so there is nothing to
+// synchronize: no shared accumulator, no reduction, no order dependence between
+// particles. That is what makes this loop safe to hand straight to OpenMP.
 void ParticleSystem::integrate(float dt) {
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
     for (int i = 0; i < m_count; ++i) {
         px[i] += vx[i] * dt;
         py[i] += vy[i] * dt;

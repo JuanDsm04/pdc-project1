@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdio>
 
+#include "parallel.hpp"
+
 namespace {
 
 // Physics advances in fixed increments so the simulation stays stable and reproducible
@@ -99,6 +101,7 @@ bool App::init(int width, int height) {
     m_framebuffer.resize(m_width, m_height);
     m_camera.setViewport(m_width, m_height);
     m_particles.reset(kDefaultParticleCount, kDefaultSeed);
+    m_projected.resize(kDefaultParticleCount);
 
     m_running = true;
     return true;
@@ -150,15 +153,33 @@ void App::update(double dt) {
     m_particles.integrate(static_cast<float>(dt));
 }
 
+// World to screen for every particle. Each iteration only reads particle i and writes
+// m_projected[i], so there is no shared state between iterations and this is safe to
+// parallelize directly, unlike the splat pass below.
+void App::projectParticles() {
+    const int count = m_particles.count();
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = 0; i < count; ++i) {
+        m_projected[i] =
+            m_camera.project({m_particles.px[i], m_particles.py[i], m_particles.pz[i]});
+    }
+}
+
 // Additive gaussian splat per particle. The footprint is a handful of pixels, clamped so
 // depth cannot make it grow without bound, which keeps every particle's cost roughly
 // constant regardless of how close it drifts to the camera.
-void App::drawParticles() {
+//
+// This stays sequential even though projectParticles is now parallel: two particles that
+// land in overlapping footprints both call Framebuffer::deposit, which does a plain += on
+// shared floats. Handing that to multiple threads without protection would race. Step 8
+// binning particles into screen tiles is what removes the race, by giving each thread
+// exclusive ownership of the pixels it writes.
+void App::splatParticles() {
     const int count = m_particles.count();
 
     for (int i = 0; i < count; ++i) {
-        const Projected p =
-            m_camera.project({m_particles.px[i], m_particles.py[i], m_particles.pz[i]});
+        const Projected& p = m_projected[i];
         if (!p.visible) continue;
 
         float pixelRadius = kParticleWorldRadius * p.scale;
@@ -229,7 +250,8 @@ void App::drawPlaceholderGlows() {
 
 void App::render() {
     m_framebuffer.clear();
-    drawParticles();
+    projectParticles();
+    splatParticles();
     drawPlaceholderGlows();
     m_framebuffer.tonemap(kExposure);
 

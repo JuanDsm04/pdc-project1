@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <SDL2/SDL.h>
 
 #include "camera.hpp"
@@ -16,7 +18,8 @@ private:
     void handleEvents();
     void update(double dt);
     void render();
-    void drawParticles();
+    void projectParticles();
+    void splatParticles();
     void drawPlaceholderGlows();
 
     SDL_Window*   m_window   = nullptr;
@@ -26,6 +29,11 @@ private:
     Framebuffer    m_framebuffer;
     Camera         m_camera;
     ParticleSystem m_particles;
+
+    // Filled by projectParticles, one entry per particle, consumed by splatParticles.
+    // Splitting the projection out of the splat loop is what lets the projection run in
+    // parallel: it only computes into this array, it never touches the framebuffer.
+    std::vector<Projected> m_projected;
 
     int    m_width   = 0;
     int    m_height  = 0;
