@@ -18,21 +18,30 @@ constexpr int kMinHeight = 480;
 
 constexpr float kExposure = 1.0f;
 
-// Canonical stone colors, used here to exercise the tone mapper and reused once the
-// stones themselves exist.
+// Canonical stone colors on independent world space orbits, used here to exercise the
+// projection and reused once the stones themselves exist.
 struct Glow {
     float r, g, b;
-    double phase;
+    float orbitRadius;
+    float orbitSpeed;
+    float phase;
+    float bob;
 };
 
 const Glow kGlows[6] = {
-    {0.20f, 0.45f, 1.00f, 0.0},  // space
-    {1.00f, 0.85f, 0.15f, 1.0},  // mind
-    {1.00f, 0.15f, 0.20f, 2.0},  // reality
-    {0.65f, 0.25f, 1.00f, 3.0},  // power
-    {0.25f, 1.00f, 0.40f, 4.0},  // time
-    {1.00f, 0.45f, 0.10f, 5.0},  // soul
+    {0.20f, 0.45f, 1.00f, 0.80f, 0.42f, 0.0f, 0.35f},  // space
+    {1.00f, 0.85f, 0.15f, 0.55f, 0.61f, 1.0f, 0.20f},  // mind
+    {1.00f, 0.15f, 0.20f, 0.95f, 0.29f, 2.1f, 0.45f},  // reality
+    {0.65f, 0.25f, 1.00f, 0.70f, 0.51f, 3.4f, 0.28f},  // power
+    {0.25f, 1.00f, 0.40f, 0.45f, 0.73f, 4.2f, 0.15f},  // time
+    {1.00f, 0.45f, 0.10f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
 };
+
+constexpr float kGlowWorldRadius = 0.16f;
+
+// Distance the orbits are tuned around. Attenuation is expressed relative to it so that
+// glows read as receding without the near ones saturating the whole frame.
+constexpr float kReferenceDepth = 3.2f;
 
 }  // namespace
 
@@ -68,6 +77,7 @@ bool App::init(int width, int height) {
     }
 
     m_framebuffer.resize(m_width, m_height);
+    m_camera.setViewport(m_width, m_height);
 
     m_running = true;
     return true;
@@ -115,26 +125,40 @@ void App::handleEvents() {
 
 void App::update(double dt) {
     m_time += dt;
+    m_camera.update(m_time);
 }
 
-// Stand in for the particle splatting that arrives at step 6. Six orbiting HDR blobs are
-// enough to prove the buffer sums past white where they overlap and rolls back off again.
+// Stand in for the particle splatting that arrives at step 6. Six HDR blobs on world
+// space orbits, projected through the camera, are enough to show perspective working:
+// they shrink and dim with distance and pass in front of and behind each other.
 void App::drawPlaceholderGlows() {
-    const float radius = 0.16f * static_cast<float>(m_height);
-    const float sigma = radius / 3.0f;
-    const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
-    const int span = static_cast<int>(radius);
-
     for (const Glow& glow : kGlows) {
-        const double angle = m_time * 0.35 + glow.phase;
-        const int cx = static_cast<int>(m_width * 0.5 + std::cos(angle) * m_width * 0.28);
-        const int cy = static_cast<int>(m_height * 0.5 + std::sin(angle * 1.3) * m_height * 0.30);
+        const float angle = static_cast<float>(m_time) * glow.orbitSpeed + glow.phase;
+        const Vec3 world = {std::cos(angle) * glow.orbitRadius,
+                            std::sin(angle * 1.7f + glow.phase) * glow.bob,
+                            std::sin(angle) * glow.orbitRadius};
+
+        const Projected p = m_camera.project(world);
+        if (!p.visible) continue;
+
+        const float pixelRadius = kGlowWorldRadius * p.scale;
+        const int span = static_cast<int>(pixelRadius);
+        if (span < 1) continue;
+
+        const float sigma = pixelRadius / 3.0f;
+        const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
+
+        const float ratio = kReferenceDepth / p.depth;
+        const float attenuation = ratio * ratio;
+        const float peak = 6.0f * (attenuation > 2.0f ? 2.0f : attenuation);
+
+        const int cx = static_cast<int>(p.x);
+        const int cy = static_cast<int>(p.y);
 
         for (int dy = -span; dy <= span; ++dy) {
             for (int dx = -span; dx <= span; ++dx) {
                 const float distSq = static_cast<float>(dx * dx + dy * dy);
-                const float falloff = std::exp(-distSq * invTwoSigmaSq);
-                const float intensity = falloff * 6.0f;
+                const float intensity = std::exp(-distSq * invTwoSigmaSq) * peak;
 
                 m_framebuffer.deposit(cx + dx, cy + dy, glow.r * intensity,
                                       glow.g * intensity, glow.b * intensity);

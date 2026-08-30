@@ -2,6 +2,7 @@
 
 #include <SDL2/SDL.h>
 
+#include "camera.hpp"
 #include "framebuffer.hpp"
 
 class App {
@@ -21,6 +22,7 @@ private:
     SDL_Texture*  m_texture  = nullptr;
 
     Framebuffer m_framebuffer;
+    Camera      m_camera;
 
     int    m_width   = 0;
     int    m_height  = 0;
