@@ -49,6 +49,20 @@ constexpr float kParticleBrightness = 0.9f;
 // glows read as receding without the near ones saturating the whole frame.
 constexpr float kReferenceDepth = 3.2f;
 
+// World space radius of a single particle's splat, before projection.
+constexpr float kParticleWorldRadius = 0.012f;
+
+// Pixel radius is clamped instead of left to scale freely with 1/depth. Without a clamp a
+// particle that drifts close to the camera would spend hundreds of pixels on one point,
+// and the per particle cost has to stay bounded for the thread count to map to frame rate
+// the way the assignment wants. The plan's 5x5 footprint target comes from this max.
+constexpr float kMinSplatRadius = 1.0f;
+constexpr float kMaxSplatRadius = 2.0f;
+
+// Tighter than the placeholder glow sigma so a particle still reads as a point of light
+// rather than a soft blob once it has more than a couple of pixels to work with.
+constexpr float kSplatSigmaScale = 0.5f;
+
 }  // namespace
 
 bool App::init(int width, int height) {
@@ -136,8 +150,9 @@ void App::update(double dt) {
     m_particles.integrate(static_cast<float>(dt));
 }
 
-// One pixel per particle for now. Step 6 replaces this with a gaussian splat whose radius
-// comes from the projected scale.
+// Additive gaussian splat per particle. The footprint is a handful of pixels, clamped so
+// depth cannot make it grow without bound, which keeps every particle's cost roughly
+// constant regardless of how close it drifts to the camera.
 void App::drawParticles() {
     const int count = m_particles.count();
 
@@ -146,12 +161,30 @@ void App::drawParticles() {
             m_camera.project({m_particles.px[i], m_particles.py[i], m_particles.pz[i]});
         if (!p.visible) continue;
 
-        const float ratio = kReferenceDepth / p.depth;
-        const float intensity = kParticleBrightness * ratio * ratio;
+        float pixelRadius = kParticleWorldRadius * p.scale;
+        if (pixelRadius < kMinSplatRadius) pixelRadius = kMinSplatRadius;
+        if (pixelRadius > kMaxSplatRadius) pixelRadius = kMaxSplatRadius;
 
-        m_framebuffer.deposit(static_cast<int>(p.x), static_cast<int>(p.y),
-                              m_particles.cr[i] * intensity, m_particles.cg[i] * intensity,
-                              m_particles.cb[i] * intensity);
+        const int span = static_cast<int>(pixelRadius);
+        const float sigma = pixelRadius * kSplatSigmaScale;
+        const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
+
+        const float ratio = kReferenceDepth / p.depth;
+        const float peak = kParticleBrightness * ratio * ratio;
+
+        const int cx = static_cast<int>(p.x);
+        const int cy = static_cast<int>(p.y);
+
+        for (int dy = -span; dy <= span; ++dy) {
+            for (int dx = -span; dx <= span; ++dx) {
+                const float distSq = static_cast<float>(dx * dx + dy * dy);
+                const float intensity = std::exp(-distSq * invTwoSigmaSq) * peak;
+
+                m_framebuffer.deposit(cx + dx, cy + dy, m_particles.cr[i] * intensity,
+                                      m_particles.cg[i] * intensity,
+                                      m_particles.cb[i] * intensity);
+            }
+        }
     }
 }
 
