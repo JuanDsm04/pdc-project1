@@ -102,6 +102,7 @@ bool App::init(int width, int height) {
     m_camera.setViewport(m_width, m_height);
     m_particles.reset(kDefaultParticleCount, kDefaultSeed);
     m_projected.resize(kDefaultParticleCount);
+    m_rasterizer.resize(m_width, m_height);
 
     m_running = true;
     return true;
@@ -166,46 +167,43 @@ void App::projectParticles() {
     }
 }
 
-// Additive gaussian splat per particle. The footprint is a handful of pixels, clamped so
-// depth cannot make it grow without bound, which keeps every particle's cost roughly
-// constant regardless of how close it drifts to the camera.
-//
-// This stays sequential even though projectParticles is now parallel: two particles that
-// land in overlapping footprints both call Framebuffer::deposit, which does a plain += on
-// shared floats. Handing that to multiple threads without protection would race. Step 8
-// binning particles into screen tiles is what removes the race, by giving each thread
-// exclusive ownership of the pixels it writes.
-void App::splatParticles() {
+// Reduces every particle's projection into a Splat: screen center, clamped footprint,
+// gaussian falloff and color, with no framebuffer access at all. Each iteration writes
+// only its own slot in m_splats, so this is safe to parallelize the same way
+// projectParticles is. An invisible particle gets peak 0 rather than being skipped, so
+// every thread's slice of the loop stays a fixed size range with no shared bookkeeping
+// about which indices landed where; m_rasterizer treats peak 0 as nothing to draw.
+void App::buildSplats() {
     const int count = m_particles.count();
+    m_splats.resize(count);
 
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
     for (int i = 0; i < count; ++i) {
         const Projected& p = m_projected[i];
-        if (!p.visible) continue;
+        Splat& s = m_splats[i];
+
+        if (!p.visible) {
+            s.peak = 0.0f;
+            continue;
+        }
 
         float pixelRadius = kParticleWorldRadius * p.scale;
         if (pixelRadius < kMinSplatRadius) pixelRadius = kMinSplatRadius;
         if (pixelRadius > kMaxSplatRadius) pixelRadius = kMaxSplatRadius;
 
-        const int span = static_cast<int>(pixelRadius);
         const float sigma = pixelRadius * kSplatSigmaScale;
-        const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
+
+        s.cx = static_cast<int>(p.x);
+        s.cy = static_cast<int>(p.y);
+        s.span = static_cast<int>(pixelRadius);
+        s.invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
 
         const float ratio = kReferenceDepth / p.depth;
-        const float peak = kParticleBrightness * ratio * ratio;
+        s.peak = kParticleBrightness * ratio * ratio;
 
-        const int cx = static_cast<int>(p.x);
-        const int cy = static_cast<int>(p.y);
-
-        for (int dy = -span; dy <= span; ++dy) {
-            for (int dx = -span; dx <= span; ++dx) {
-                const float distSq = static_cast<float>(dx * dx + dy * dy);
-                const float intensity = std::exp(-distSq * invTwoSigmaSq) * peak;
-
-                m_framebuffer.deposit(cx + dx, cy + dy, m_particles.cr[i] * intensity,
-                                      m_particles.cg[i] * intensity,
-                                      m_particles.cb[i] * intensity);
-            }
-        }
+        s.r = m_particles.cr[i];
+        s.g = m_particles.cg[i];
+        s.b = m_particles.cb[i];
     }
 }
 
@@ -251,7 +249,8 @@ void App::drawPlaceholderGlows() {
 void App::render() {
     m_framebuffer.clear();
     projectParticles();
-    splatParticles();
+    buildSplats();
+    m_rasterizer.draw(m_splats, m_framebuffer);
     drawPlaceholderGlows();
     m_framebuffer.tonemap(kExposure);
 

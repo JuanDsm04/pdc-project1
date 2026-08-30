@@ -7,6 +7,7 @@
 #include "camera.hpp"
 #include "framebuffer.hpp"
 #include "particles.hpp"
+#include "raster.hpp"
 
 class App {
 public:
@@ -19,7 +20,7 @@ private:
     void update(double dt);
     void render();
     void projectParticles();
-    void splatParticles();
+    void buildSplats();
     void drawPlaceholderGlows();
 
     SDL_Window*   m_window   = nullptr;
@@ -29,11 +30,18 @@ private:
     Framebuffer    m_framebuffer;
     Camera         m_camera;
     ParticleSystem m_particles;
+    Rasterizer     m_rasterizer;
 
-    // Filled by projectParticles, one entry per particle, consumed by splatParticles.
+    // Filled by projectParticles, one entry per particle, consumed by buildSplats.
     // Splitting the projection out of the splat loop is what lets the projection run in
     // parallel: it only computes into this array, it never touches the framebuffer.
     std::vector<Projected> m_projected;
+
+    // Filled by buildSplats, one entry per particle, consumed by m_rasterizer. Building
+    // this is parallel for the same reason projectParticles is: each particle only ever
+    // writes its own slot. Handing the framebuffer writes to the rasterizer instead of
+    // doing them here is what makes that safe now, where before it was not.
+    std::vector<Splat> m_splats;
 
     int    m_width   = 0;
     int    m_height  = 0;
