@@ -1,5 +1,6 @@
 #include "stones.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -18,9 +19,9 @@ const OrbitParams kOrbits[6] = {
     {0.20f, 0.45f, 1.00f, 0.80f, 0.42f, 0.0f, 0.35f},  // space
     {1.00f, 0.85f, 0.15f, 0.55f, 0.61f, 1.0f, 0.20f},  // mind
     {1.00f, 0.15f, 0.20f, 0.95f, 0.29f, 2.1f, 0.45f},  // reality
-    {0.65f, 0.25f, 1.00f, 0.70f, 0.51f, 3.4f, 0.28f},  // power
+    {0.45f, 0.12f, 1.00f, 0.70f, 0.51f, 3.4f, 0.28f},  // power
     {0.25f, 1.00f, 0.40f, 0.45f, 0.73f, 4.2f, 0.15f},  // time
-    {1.00f, 0.45f, 0.10f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
+    {1.00f, 0.32f, 0.03f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
 };
 
 Vec3 orbitPosition(const OrbitParams& o, double time) {
@@ -59,44 +60,106 @@ constexpr float  kShockMaxRadius   = 2.0f;
 constexpr float  kShockShellWidth  = 0.08f;
 constexpr float  kShockImpulse     = 1.6f;
 
-// Harmonic numbers summed into a silhouette, low to high. Skipping 1 and 2 avoids a shape
-// that is mostly just recentered or egg shaped; starting at 3 guarantees at least three
-// lobes so the outline reads as faceted rather than merely lopsided.
-constexpr int kFacetHarmonicNumber[kFacetHarmonics] = {3, 4, 5, 6, 7};
+// Power is a broad, heavy shard with a broken shoulder and a flatter base. Soul is taller,
+// narrower and more flame-like. Points run clockwise in screen space and both polygons
+// contain the origin, which lets stoneShapeRadius intersect a ray with their edges.
+constexpr StoneOutlinePoint kPowerOutline[] = {
+    {-0.18f, -1.12f}, { 0.23f, -1.20f}, { 0.58f, -1.02f}, { 0.76f, -0.61f},
+    { 0.70f, -0.23f}, { 0.88f,  0.18f}, { 0.70f,  0.68f}, { 0.35f,  1.00f},
+    {-0.12f,  1.10f}, {-0.55f,  0.94f}, {-0.79f,  0.57f}, {-0.88f,  0.08f},
+    {-0.75f, -0.48f}, {-0.50f, -0.91f},
+};
 
-// Deterministic, not random: two stones built from the same seed would look identical, and
-// a seed has to stay fixed across a run for the silhouette not to swim from frame to frame.
-void generateFacets(uint32_t seed, Stone& stone) {
-    uint32_t h = seed;
-    for (int k = 0; k < kFacetHarmonics; ++k) {
-        // Higher harmonics get a smaller amplitude ceiling, the way a rock's outline has
-        // one or two dominant lobes with progressively finer chipping on top rather than
-        // every frequency contributing equally.
-        const float maxAmplitude = 0.30f / static_cast<float>(k + 1);
+constexpr StoneFacetSeed kPowerFacets[] = {
+    {-0.48f, -0.64f, 0.74f}, { 0.02f, -0.82f, 1.20f}, { 0.48f, -0.48f, 0.88f},
+    {-0.50f, -0.05f, 1.08f}, { 0.10f, -0.10f, 0.79f}, { 0.55f,  0.21f, 1.17f},
+    {-0.31f,  0.59f, 0.82f}, { 0.25f,  0.68f, 1.06f},
+};
 
-        h = hashCombine(h, static_cast<uint32_t>(k * 2 + 1));
-        stone.facetAmplitude[k] = maxAmplitude * (0.5f + 0.5f * randomFloat(h));
+constexpr StoneOutlinePoint kSoulOutline[] = {
+    {-0.10f, -1.36f}, { 0.25f, -1.25f}, { 0.37f, -0.94f}, { 0.55f, -0.68f},
+    { 0.48f, -0.31f}, { 0.61f,  0.08f}, { 0.54f,  0.55f}, { 0.40f,  0.98f},
+    { 0.15f,  1.27f}, {-0.20f,  1.32f}, {-0.43f,  1.08f}, {-0.55f,  0.66f},
+    {-0.49f,  0.22f}, {-0.62f, -0.20f}, {-0.46f, -0.69f}, {-0.35f, -1.12f},
+};
 
-        h = hashCombine(h, static_cast<uint32_t>(k * 2 + 2));
-        stone.facetPhase[k] = randomFloat(h) * 2.0f * kPi;
-    }
+constexpr StoneFacetSeed kSoulFacets[] = {
+    {-0.25f, -0.98f, 0.78f}, { 0.18f, -0.91f, 1.16f}, {-0.31f, -0.39f, 1.07f},
+    { 0.23f, -0.43f, 0.83f}, {-0.05f,  0.02f, 1.22f}, { 0.35f,  0.29f, 0.76f},
+    {-0.28f,  0.54f, 0.87f}, { 0.10f,  0.87f, 1.10f},
+};
+
+template <size_t N, size_t M>
+void setVisual(Stone& stone, const StoneOutlinePoint (&outline)[N],
+               const StoneFacetSeed (&facets)[M]) {
+    static_assert(N <= kMaxStoneOutlinePoints, "stone outline storage is too small");
+    static_assert(M <= kMaxStoneFacetSeeds, "stone facet storage is too small");
+    stone.outlineCount = static_cast<int>(N);
+    stone.facetSeedCount = static_cast<int>(M);
+    std::copy(outline, outline + N, stone.outline);
+    std::copy(facets, facets + M, stone.facetSeeds);
+}
+
+float cross2(StoneOutlinePoint a, StoneOutlinePoint b) {
+    return a.x * b.y - a.y * b.x;
 }
 
 }  // namespace
 
 float stoneShapeRadius(const Stone& stone, float angle) {
-    float multiplier = 1.0f;
-    for (int k = 0; k < kFacetHarmonics; ++k) {
-        const float harmonic = static_cast<float>(kFacetHarmonicNumber[k]);
-        multiplier += stone.facetAmplitude[k] *
-                      std::cos(harmonic * angle + stone.facetPhase[k]);
+    if (stone.outlineCount < 3) return 1.0f;
+
+    const StoneOutlinePoint ray = {std::cos(angle), std::sin(angle)};
+    float nearest = 1000.0f;
+
+    for (int i = 0; i < stone.outlineCount; ++i) {
+        const StoneOutlinePoint a = stone.outline[i];
+        const StoneOutlinePoint b = stone.outline[(i + 1) % stone.outlineCount];
+        const StoneOutlinePoint edge = {b.x - a.x, b.y - a.y};
+        const float denominator = cross2(ray, edge);
+        if (std::fabs(denominator) < 1e-6f) continue;
+
+        const float distance = cross2(a, edge) / denominator;
+        const float alongEdge = cross2(a, ray) / denominator;
+        if (distance >= 0.0f && alongEdge >= 0.0f && alongEdge <= 1.0f) {
+            nearest = std::min(nearest, distance);
+        }
     }
-    // The harmonic sum can push the multiplier below zero or well above 1 if enough phases
-    // happen to line up; clamping keeps the silhouette a recognizable blob instead of a
-    // spike or an inverted hole.
-    if (multiplier < 0.5f) return 0.5f;
-    if (multiplier > 1.75f) return 1.75f;
-    return multiplier;
+
+    // Authored outlines contain the origin, but retaining a safe circular fallback avoids
+    // a broken render if a future stone is edited into a non-star-shaped polygon.
+    return nearest < 1000.0f ? nearest : 1.0f;
+}
+
+float stoneSurfaceLighting(const Stone& stone, float x, float y) {
+    if (stone.facetSeedCount < 2) return 1.0f;
+
+    float nearest = 1000.0f;
+    float second = 1000.0f;
+    float planeLight = 1.0f;
+
+    for (int i = 0; i < stone.facetSeedCount; ++i) {
+        const StoneFacetSeed& seed = stone.facetSeeds[i];
+        // A small shear stops the cells from looking like regular round bubbles and makes
+        // their boundaries read as long crystal planes.
+        const float dx = (x - seed.x) + 0.22f * (y - seed.y);
+        const float dy = (y - seed.y) * 0.82f;
+        const float distanceSq = dx * dx + dy * dy;
+        if (distanceSq < nearest) {
+            second = nearest;
+            nearest = distanceSq;
+            planeLight = seed.light;
+        } else if (distanceSq < second) {
+            second = distanceSq;
+        }
+    }
+
+    const float seam = std::exp(-std::fabs(second - nearest) * 32.0f);
+    const float directional = 1.0f + 0.10f * (-0.65f * x - 0.35f * y);
+    const float fineTexture = 0.035f * std::sin(x * 31.0f + y * 19.0f) +
+                              0.025f * std::sin(x * 13.0f - y * 37.0f);
+    const float light = planeLight * directional + seam * 0.34f + fineTexture;
+    return std::max(0.48f, std::min(1.48f, light));
 }
 
 Stones::Stones() {
@@ -108,11 +171,8 @@ Stones::Stones() {
         m_stones[i].b = kOrbits[i].b;
     }
 
-    // One seed per stone so their silhouettes do not match each other. Space, Time,
-    // Reality and Mind keep facetAmplitude at zero (a plain circle) until their own turn
-    // at steps 11 and 12.
-    generateFacets(0xA17B2E11u, m_stones[static_cast<size_t>(StoneKind::Soul)]);
-    generateFacets(0xC9F13D45u, m_stones[static_cast<size_t>(StoneKind::Power)]);
+    setVisual(m_stones[static_cast<size_t>(StoneKind::Power)], kPowerOutline, kPowerFacets);
+    setVisual(m_stones[static_cast<size_t>(StoneKind::Soul)], kSoulOutline, kSoulFacets);
 }
 
 void Stones::update(double time, float dt) {

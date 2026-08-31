@@ -7,9 +7,25 @@
 
 enum class StoneKind { Space, Mind, Reality, Power, Time, Soul, Count };
 
-// Number of angular harmonics summed into a stone's silhouette. Five is enough to read as
-// a jagged, irregular gem rather than either a perfect circle or noise.
-constexpr int kFacetHarmonics = 5;
+// The two finished stones use hand-authored, convex-ish outlines rather than a noisy
+// circle. Keeping the points in normalized screen space makes the silhouette cheap to
+// rasterize while still allowing every stone to have a completely different aspect ratio.
+constexpr int kMaxStoneOutlinePoints = 16;
+constexpr int kMaxStoneFacetSeeds = 8;
+
+struct StoneOutlinePoint {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+// A small Voronoi field inside the silhouette gives the stone broad crystal planes. The
+// value is the amount of light caught by that plane; it is intentionally authored with the
+// outline so the internal structure is different for Soul and Power as well.
+struct StoneFacetSeed {
+    float x = 0.0f;
+    float y = 0.0f;
+    float light = 1.0f;
+};
 
 // A stone's own moving body: what App needs to render it, plus what applyForces needs to
 // know where it is. Orbit choreography lives in stones.cpp, not here, since nothing outside
@@ -19,18 +35,20 @@ struct Stone {
     float r, g, b;
     Vec3  position;
 
-    // Angular silhouette as a low order Fourier series: stoneShapeRadius sums these into a
-    // radius multiplier that varies with angle instead of staying flat at 1. Left at zero
-    // this collapses back to a plain circle, which is what a stone without a shape yet
-    // (still generated at steps 11 and 12) renders as.
-    float facetAmplitude[kFacetHarmonics] = {};
-    float facetPhase[kFacetHarmonics] = {};
+    int outlineCount = 0;
+    StoneOutlinePoint outline[kMaxStoneOutlinePoints] = {};
+
+    int facetSeedCount = 0;
+    StoneFacetSeed facetSeeds[kMaxStoneFacetSeeds] = {};
 };
 
-// Radius multiplier for a stone's silhouette at a given screen space angle. A stone with
-// no facets generated returns 1 for every angle, i.e. a circle, so the caller never has to
-// branch between faceted and unfaceted stones.
+// Distance from the stone's center to its polygon edge along a screen-space ray. A stone
+// with no authored outline returns 1, so unfinished stones retain their circular glow.
 float stoneShapeRadius(const Stone& stone, float angle);
+
+// Lighting multiplier for a normalized point inside a stone. Authored facet seeds form
+// irregular planes and bright seams; unfinished circular stones simply return 1.
+float stoneSurfaceLighting(const Stone& stone, float x, float y);
 
 // One expanding shockwave front spawned by the Power stone. Radius is derived from age
 // rather than stored, so aging every front is a single add with nothing else to keep in

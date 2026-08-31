@@ -1,5 +1,6 @@
 #include "app.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -22,16 +23,14 @@ constexpr float kExposure = 1.0f;
 
 constexpr float kGlowWorldRadius = 0.16f;
 
-// Bounding box for a stone's splat has to cover the widest bulge stoneShapeRadius can
-// return (clamped to 1.75 there), or a facet sticking out past a plain circle's radius
-// would get clipped by a loop sized for the unfaceted case.
-constexpr float kShapeMaxMultiplier = 1.75f;
+// Covers Soul's tall tip plus the soft halo. Authored outline coordinates stay below 1.4.
+constexpr float kShapeMaxMultiplier = 1.42f;
 
 // Soft bloom just outside a stone's faceted edge, weaker than the core and only reaching a
 // third of a pixel radius further out, so it reads as light bleeding off the gem rather
 // than blurring the silhouette away.
-constexpr float kGlowHaloStrength = 0.35f;
-constexpr float kGlowHaloSigmaScale = 0.35f;
+constexpr float kGlowHaloStrength = 0.18f;
+constexpr float kGlowHaloSigmaScale = 0.24f;
 
 // Stands in for the --particles flag until the CLI lands at step 15.
 constexpr int      kDefaultParticleCount = 200;
@@ -216,8 +215,8 @@ void App::buildSplats() {
 
 // Draws every stone's own glowing body at its current position. All six still share this
 // one rendering pass regardless of whether they have real physics or a real silhouette
-// yet: a stone's shape function returns a plain circle until stoneShapeRadius has facets
-// to sum, so unfaceted stones (Space, Time, Reality, Mind for now) render exactly as
+// yet: a stone's shape function returns a plain circle until it has an authored outline,
+// so unfinished stones (Space, Time, Reality, Mind for now) render exactly as
 // before. Soul's glow brightens with how many particles it currently holds, so the
 // capture and release cycle its physics drives is visible even without a HUD readout of
 // the count.
@@ -259,14 +258,19 @@ void App::drawStones() {
 
                 float intensity;
                 if (r <= shapeRadius) {
-                    // Same falloff shape the old plain circle used (sigma = pixelRadius/3
-                    // there), so an unfaceted stone renders pixel identical to before this
-                    // change. Bulges catch more brightness than valleys, the way a real
-                    // facet angled toward the light does.
                     const float t = shapeRadius > 1e-4f ? r / shapeRadius : 0.0f;
-                    const float core = std::exp(-t * t * 4.5f);
-                    const float facetShade = 1.0f + 0.35f * (shapeMul - 1.0f);
-                    intensity = peak * core * facetShade;
+                    if (stone.outlineCount >= 3) {
+                        const float nx = fx / pixelRadius;
+                        const float ny = fy / pixelRadius;
+                        const float centralGlow = std::exp(-(nx * nx + ny * ny) * 1.25f);
+                        const float rim = 0.58f + 0.42f * std::min(1.0f, (1.0f - t) * 7.0f);
+                        const float facets = stoneSurfaceLighting(stone, nx, ny);
+                        intensity = peak * (0.09f + 0.30f * centralGlow) * rim * facets;
+                    } else {
+                        // Unfinished stones deliberately retain the original circular,
+                        // gaussian body until their own outlines are authored.
+                        intensity = peak * std::exp(-t * t * 4.5f);
+                    }
                 } else {
                     const float beyond = r - shapeRadius;
                     intensity = peak * kGlowHaloStrength *
