@@ -26,12 +26,14 @@ public:
     // Bins every splat into tiles (parallel over splats, using per thread scratch bins so
     // no two threads ever write the same bin), then rasterizes every tile into the
     // framebuffer (parallel over tiles, race free because tiles never share a pixel).
-    void draw(const std::vector<Splat>& splats, Framebuffer& framebuffer);
-
-private:
+    //
+    // Public rather than one draw() call so the caller can put a timer around each half:
+    // bin and rasterize are separate boundaries in the plan's frame pipeline, and folding
+    // them into one call would hide which of the two is actually costing the frame time.
     void bin(const std::vector<Splat>& splats);
     void rasterizeTiles(Framebuffer& framebuffer) const;
 
+private:
     static constexpr int kTileSize = 32;
 
     int m_width = 0, m_height = 0;

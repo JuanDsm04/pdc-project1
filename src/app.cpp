@@ -42,7 +42,7 @@ const Glow kGlows[6] = {
 constexpr float kGlowWorldRadius = 0.16f;
 
 // Stands in for the --particles flag until the CLI lands at step 15.
-constexpr int      kDefaultParticleCount = 200000;
+constexpr int      kDefaultParticleCount = 200;
 constexpr uint32_t kDefaultSeed = 1337u;
 
 constexpr float kParticleBrightness = 0.9f;
@@ -104,6 +104,8 @@ bool App::init(int width, int height) {
     m_projected.resize(kDefaultParticleCount);
     m_rasterizer.resize(m_width, m_height);
 
+    if (!m_hud.init()) return false;
+
     m_running = true;
     return true;
 }
@@ -114,6 +116,8 @@ void App::run() {
     double accumulator = 0.0;
 
     while (m_running) {
+        m_timer.beginFrame();
+
         const Uint64 now = SDL_GetPerformanceCounter();
         double frameTime = static_cast<double>(now - previous) / freq;
         previous = now;
@@ -129,6 +133,9 @@ void App::run() {
         }
 
         render();
+
+        m_timer.endFrame();
+        m_hud.update(m_timer);
     }
 }
 
@@ -151,7 +158,10 @@ void App::handleEvents() {
 void App::update(double dt) {
     m_time += dt;
     m_camera.update(m_time);
+
+    m_timer.begin(Stage::Integrate);
     m_particles.integrate(static_cast<float>(dt));
+    m_timer.end(Stage::Integrate);
 }
 
 // World to screen for every particle. Each iteration only reads particle i and writes
@@ -248,18 +258,41 @@ void App::drawPlaceholderGlows() {
 
 void App::render() {
     m_framebuffer.clear();
-    projectParticles();
-    buildSplats();
-    m_rasterizer.draw(m_splats, m_framebuffer);
-    drawPlaceholderGlows();
-    m_framebuffer.tonemap(kExposure);
 
+    m_timer.begin(Stage::Project);
+    projectParticles();
+    m_timer.end(Stage::Project);
+
+    m_timer.begin(Stage::BuildSplats);
+    buildSplats();
+    m_timer.end(Stage::BuildSplats);
+
+    m_timer.begin(Stage::Bin);
+    m_rasterizer.bin(m_splats);
+    m_timer.end(Stage::Bin);
+
+    m_timer.begin(Stage::Raster);
+    m_rasterizer.rasterizeTiles(m_framebuffer);
+    m_timer.end(Stage::Raster);
+
+    m_timer.begin(Stage::Glows);
+    drawPlaceholderGlows();
+    m_timer.end(Stage::Glows);
+
+    m_timer.begin(Stage::Tonemap);
+    m_framebuffer.tonemap(kExposure);
+    m_timer.end(Stage::Tonemap);
+
+    m_timer.begin(Stage::Present);
     SDL_UpdateTexture(m_texture, nullptr, m_framebuffer.pixels(), m_framebuffer.pitch());
     SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);
+    m_hud.render(m_renderer);
     SDL_RenderPresent(m_renderer);
+    m_timer.end(Stage::Present);
 }
 
 void App::shutdown() {
+    m_hud.shutdown();
     if (m_texture) SDL_DestroyTexture(m_texture);
     if (m_renderer) SDL_DestroyRenderer(m_renderer);
     if (m_window) SDL_DestroyWindow(m_window);

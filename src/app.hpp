@@ -6,8 +6,10 @@
 
 #include "camera.hpp"
 #include "framebuffer.hpp"
+#include "hud.hpp"
 #include "particles.hpp"
 #include "raster.hpp"
+#include "timing.hpp"
 
 class App {
 public:
@@ -31,6 +33,8 @@ private:
     Camera         m_camera;
     ParticleSystem m_particles;
     Rasterizer     m_rasterizer;
+    Hud            m_hud;
+    FrameTimer     m_timer;
 
     // Filled by projectParticles, one entry per particle, consumed by buildSplats.
     // Splitting the projection out of the splat loop is what lets the projection run in

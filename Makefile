@@ -3,8 +3,8 @@ ARCHFLAG := -march=native
 CXXFLAGS := -std=c++17 -O3 $(ARCHFLAG) -Wall -Wextra -fopenmp
 LDFLAGS  := -fopenmp
 
-SDL_CFLAGS := $(shell pkg-config --cflags sdl2)
-SDL_LIBS   := $(shell pkg-config --libs sdl2)
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2 SDL2_ttf)
+SDL_LIBS   := $(shell pkg-config --libs sdl2 SDL2_ttf)
 
 SRC_DIR := src
 OBJ_DIR := build

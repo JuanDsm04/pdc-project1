@@ -21,11 +21,6 @@ void Rasterizer::resize(int width, int height) {
     m_scratch.assign(maxThreads, std::vector<std::vector<Splat>>(tileCount));
 }
 
-void Rasterizer::draw(const std::vector<Splat>& splats, Framebuffer& framebuffer) {
-    bin(splats);
-    rasterizeTiles(framebuffer);
-}
-
 // Splats are appended into tiles from a loop over particles, which is the natural order to
 // visit them in but the wrong order to write tiles in: two threads could easily land in the
 // same tile on the same frame. Giving every thread its own private set of tile bins avoids
