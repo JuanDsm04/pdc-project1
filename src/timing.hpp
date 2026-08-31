@@ -9,6 +9,7 @@
 // code yet (force application, spatial grid) are absent rather than reserved as empty
 // slots ahead of time.
 enum class Stage {
+    Forces,
     Integrate,
     Project,
     BuildSplats,

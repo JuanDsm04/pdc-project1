@@ -24,6 +24,12 @@ public:
     std::vector<float> vx, vy, vz;
     std::vector<float> cr, cg, cb;
 
+    // Set by Stones::applyForces when the Soul stone currently holds a particle in orbit.
+    // Lives here rather than in Stones because it has to sit next to the rest of a
+    // particle's state for the integrate loop's cache access pattern to stay coherent, the
+    // same reasoning that keeps every other per particle attribute in its own array.
+    std::vector<uint8_t> captured;
+
 private:
     int m_count = 0;
 };

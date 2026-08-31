@@ -4,7 +4,6 @@
 
 namespace {
 
-constexpr float kPi = 3.14159265f;
 constexpr float kSpawnRadius = 0.95f;
 
 // Perfectly elastic walls. With no forces acting yet the only energy in the system is
@@ -36,6 +35,7 @@ void ParticleSystem::reset(int count, uint32_t seed) {
     px.resize(count); py.resize(count); pz.resize(count);
     vx.resize(count); vy.resize(count); vz.resize(count);
     cr.resize(count); cg.resize(count); cb.resize(count);
+    captured.assign(count, 0);
 
     for (int i = 0; i < count; ++i) {
         uint32_t h = hashCombine(seed, static_cast<uint32_t>(i));

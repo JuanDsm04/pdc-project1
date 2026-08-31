@@ -9,6 +9,7 @@
 #include "hud.hpp"
 #include "particles.hpp"
 #include "raster.hpp"
+#include "stones.hpp"
 #include "timing.hpp"
 
 class App {
@@ -23,7 +24,7 @@ private:
     void render();
     void projectParticles();
     void buildSplats();
-    void drawPlaceholderGlows();
+    void drawStones();
 
     SDL_Window*   m_window   = nullptr;
     SDL_Renderer* m_renderer = nullptr;
@@ -35,6 +36,7 @@ private:
     Rasterizer     m_rasterizer;
     Hud            m_hud;
     FrameTimer     m_timer;
+    Stones         m_stones;
 
     // Filled by projectParticles, one entry per particle, consumed by buildSplats.
     // Splitting the projection out of the splat loop is what lets the projection run in

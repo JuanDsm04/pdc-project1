@@ -20,26 +20,18 @@ constexpr int kMinHeight = 480;
 
 constexpr float kExposure = 1.0f;
 
-// Canonical stone colors on independent world space orbits, used here to exercise the
-// projection and reused once the stones themselves exist.
-struct Glow {
-    float r, g, b;
-    float orbitRadius;
-    float orbitSpeed;
-    float phase;
-    float bob;
-};
-
-const Glow kGlows[6] = {
-    {0.20f, 0.45f, 1.00f, 0.80f, 0.42f, 0.0f, 0.35f},  // space
-    {1.00f, 0.85f, 0.15f, 0.55f, 0.61f, 1.0f, 0.20f},  // mind
-    {1.00f, 0.15f, 0.20f, 0.95f, 0.29f, 2.1f, 0.45f},  // reality
-    {0.65f, 0.25f, 1.00f, 0.70f, 0.51f, 3.4f, 0.28f},  // power
-    {0.25f, 1.00f, 0.40f, 0.45f, 0.73f, 4.2f, 0.15f},  // time
-    {1.00f, 0.45f, 0.10f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
-};
-
 constexpr float kGlowWorldRadius = 0.16f;
+
+// Bounding box for a stone's splat has to cover the widest bulge stoneShapeRadius can
+// return (clamped to 1.75 there), or a facet sticking out past a plain circle's radius
+// would get clipped by a loop sized for the unfaceted case.
+constexpr float kShapeMaxMultiplier = 1.75f;
+
+// Soft bloom just outside a stone's faceted edge, weaker than the core and only reaching a
+// third of a pixel radius further out, so it reads as light bleeding off the gem rather
+// than blurring the silhouette away.
+constexpr float kGlowHaloStrength = 0.35f;
+constexpr float kGlowHaloSigmaScale = 0.35f;
 
 // Stands in for the --particles flag until the CLI lands at step 15.
 constexpr int      kDefaultParticleCount = 200;
@@ -159,6 +151,11 @@ void App::update(double dt) {
     m_time += dt;
     m_camera.update(m_time);
 
+    m_timer.begin(Stage::Forces);
+    m_stones.update(m_time, static_cast<float>(dt));
+    m_stones.applyForces(m_particles, static_cast<float>(dt));
+    m_timer.end(Stage::Forces);
+
     m_timer.begin(Stage::Integrate);
     m_particles.integrate(static_cast<float>(dt));
     m_timer.end(Stage::Integrate);
@@ -217,40 +214,67 @@ void App::buildSplats() {
     }
 }
 
-// Stand in for the particle splatting that arrives at step 6. Six HDR blobs on world
-// space orbits, projected through the camera, are enough to show perspective working:
-// they shrink and dim with distance and pass in front of and behind each other.
-void App::drawPlaceholderGlows() {
-    for (const Glow& glow : kGlows) {
-        const float angle = static_cast<float>(m_time) * glow.orbitSpeed + glow.phase;
-        const Vec3 world = {std::cos(angle) * glow.orbitRadius,
-                            std::sin(angle * 1.7f + glow.phase) * glow.bob,
-                            std::sin(angle) * glow.orbitRadius};
-
-        const Projected p = m_camera.project(world);
+// Draws every stone's own glowing body at its current position. All six still share this
+// one rendering pass regardless of whether they have real physics or a real silhouette
+// yet: a stone's shape function returns a plain circle until stoneShapeRadius has facets
+// to sum, so unfaceted stones (Space, Time, Reality, Mind for now) render exactly as
+// before. Soul's glow brightens with how many particles it currently holds, so the
+// capture and release cycle its physics drives is visible even without a HUD readout of
+// the count.
+void App::drawStones() {
+    for (const Stone& stone : m_stones.all()) {
+        const Projected p = m_camera.project(stone.position);
         if (!p.visible) continue;
 
         const float pixelRadius = kGlowWorldRadius * p.scale;
-        const int span = static_cast<int>(pixelRadius);
+        const float haloSigma = pixelRadius * kGlowHaloSigmaScale;
+        const int span =
+            static_cast<int>(pixelRadius * kShapeMaxMultiplier + haloSigma * 3.0f);
         if (span < 1) continue;
 
-        const float sigma = pixelRadius / 3.0f;
-        const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
+        const float invHaloTwoSigmaSq = 1.0f / (2.0f * haloSigma * haloSigma);
 
         const float ratio = kReferenceDepth / p.depth;
         const float attenuation = ratio * ratio;
-        const float peak = 6.0f * (attenuation > 2.0f ? 2.0f : attenuation);
+        float peak = 6.0f * (attenuation > 2.0f ? 2.0f : attenuation);
+
+        if (stone.kind == StoneKind::Soul) {
+            const float fill = static_cast<float>(m_stones.soulCapturedCount()) /
+                               static_cast<float>(m_particles.count());
+            peak *= 1.0f + 2.0f * fill;
+        }
 
         const int cx = static_cast<int>(p.x);
         const int cy = static_cast<int>(p.y);
 
         for (int dy = -span; dy <= span; ++dy) {
             for (int dx = -span; dx <= span; ++dx) {
-                const float distSq = static_cast<float>(dx * dx + dy * dy);
-                const float intensity = std::exp(-distSq * invTwoSigmaSq) * peak;
+                const float fx = static_cast<float>(dx);
+                const float fy = static_cast<float>(dy);
+                const float r = std::sqrt(fx * fx + fy * fy);
+                const float angle = std::atan2(fy, fx);
 
-                m_framebuffer.deposit(cx + dx, cy + dy, glow.r * intensity,
-                                      glow.g * intensity, glow.b * intensity);
+                const float shapeMul = stoneShapeRadius(stone, angle);
+                const float shapeRadius = pixelRadius * shapeMul;
+
+                float intensity;
+                if (r <= shapeRadius) {
+                    // Same falloff shape the old plain circle used (sigma = pixelRadius/3
+                    // there), so an unfaceted stone renders pixel identical to before this
+                    // change. Bulges catch more brightness than valleys, the way a real
+                    // facet angled toward the light does.
+                    const float t = shapeRadius > 1e-4f ? r / shapeRadius : 0.0f;
+                    const float core = std::exp(-t * t * 4.5f);
+                    const float facetShade = 1.0f + 0.35f * (shapeMul - 1.0f);
+                    intensity = peak * core * facetShade;
+                } else {
+                    const float beyond = r - shapeRadius;
+                    intensity = peak * kGlowHaloStrength *
+                               std::exp(-(beyond * beyond) * invHaloTwoSigmaSq);
+                }
+
+                m_framebuffer.deposit(cx + dx, cy + dy, stone.r * intensity,
+                                      stone.g * intensity, stone.b * intensity);
             }
         }
     }
@@ -276,7 +300,7 @@ void App::render() {
     m_timer.end(Stage::Raster);
 
     m_timer.begin(Stage::Glows);
-    drawPlaceholderGlows();
+    drawStones();
     m_timer.end(Stage::Glows);
 
     m_timer.begin(Stage::Tonemap);
