@@ -106,6 +106,10 @@ bool App::init(int width, int height) {
     m_projected.resize(kDefaultParticleCount);
     m_rasterizer.resize(m_width, m_height);
 
+    // Cells a little wider than a particle is likely to travel in one step, so a flock's
+    // neighbourhood is genuinely covered by the 27 cells Mind reads.
+    m_grid.configure(kWorldHalfExtent, 12);
+
     if (!m_hud.init()) return false;
 
     m_running = true;
@@ -161,9 +165,15 @@ void App::update(double dt) {
     m_time += dt;
     m_camera.update(m_time);
 
+    // The grid is rebuilt before the forces because Mind reads it and nothing writes it,
+    // which is what lets the whole force pass stay one parallel loop over particles.
+    m_timer.begin(Stage::Grid);
+    m_grid.build(m_particles);
+    m_timer.end(Stage::Grid);
+
     m_timer.begin(Stage::Forces);
     m_stones.update(m_time, static_cast<float>(dt));
-    m_stones.applyForces(m_particles, static_cast<float>(dt));
+    m_stones.applyForces(m_particles, m_grid, static_cast<float>(dt));
     m_timer.end(Stage::Forces);
 
     m_timer.begin(Stage::Integrate);

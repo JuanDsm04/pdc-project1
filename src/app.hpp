@@ -6,6 +6,7 @@
 
 #include "camera.hpp"
 #include "framebuffer.hpp"
+#include "grid.hpp"
 #include "hud.hpp"
 #include "particles.hpp"
 #include "raster.hpp"
@@ -35,6 +36,7 @@ private:
     Camera         m_camera;
     ParticleSystem m_particles;
     Rasterizer     m_rasterizer;
+    SpatialGrid    m_grid;
     Hud            m_hud;
     FrameTimer     m_timer;
     Stones         m_stones;

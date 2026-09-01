@@ -5,10 +5,10 @@
 #include <SDL2/SDL.h>
 
 // Named checkpoints inside one rendered frame. The list mirrors the stages render() and
-// update() actually call today; stages docs/PLAN.md describes but that do not exist in
-// code yet (force application, spatial grid) are absent rather than reserved as empty
-// slots ahead of time.
+// update() actually call today. Stages docs/PLAN.md describes but that do not exist in code
+// yet are absent rather than reserved as empty slots ahead of time.
 enum class Stage {
+    Grid,
     Forces,
     Integrate,
     Project,

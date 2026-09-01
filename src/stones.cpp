@@ -103,6 +103,38 @@ constexpr int    kHistoryStride = 6;
 constexpr double kTimeRewindPeriod   = 7.5;
 constexpr double kTimeRewindDuration = 0.45;
 
+// Reality: positions are rotated about the stone's own axis by an angle that falls off with
+// distance, so straight paths bend into a spiral sheet rather than merely speeding up. The
+// per particle sine and cosine are the point of this stone, not an accident: it is the
+// highest FLOP kernel of the six and the one that shows what happens when a parallel loop
+// is arithmetic bound instead of memory bound.
+constexpr float kRealityRadius = 0.80f;
+constexpr float kRealityTwist  = 3.10f;
+
+// Warped matter is dragged toward a hot saturated core colour. Reality is the only stone
+// that edits a particle's appearance rather than only its motion.
+constexpr float kRealityTintRate = 1.30f;
+constexpr float kRealityTint[3]  = {1.00f, 0.13f, 0.17f};
+
+// Mind: classic boids, but weighed against grid cell summaries rather than individual
+// neighbours. Twenty seven cell reads per particle is tractable where five thousand pairwise
+// distance checks is not, and it keeps the irregular, cache unfriendly access pattern that
+// makes this stone worth measuring separately.
+constexpr float kMindRadius     = 0.75f;
+constexpr float kMindCohesion   = 1.45f;
+constexpr float kMindAlignment  = 2.10f;
+constexpr float kMindSeparation = 0.55f;
+constexpr float kMindSeparationFalloff = 12.0f;
+constexpr float kMindSpeedLimit = 0.95f;
+
+// Rodrigues rotation of a vector about a unit axis. Reality is the only caller, but keeping
+// it out of the loop body keeps that loop readable.
+inline Vec3 rotateAboutAxis(Vec3 v, Vec3 axis, float angle) {
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    return v * c + cross(axis, v) * s + axis * (dot(axis, v) * (1.0f - c));
+}
+
 // An orthonormal frame anchored to a portal mouth. Rebuilding it every frame is six stone
 // sized operations, so it stays outside the particle loop and the loop just reads it.
 void portalFrame(Vec3 center, Vec3& normal, Vec3& tangent, Vec3& bitangent) {
@@ -159,6 +191,56 @@ constexpr StoneFacetSeed kSoulFacets[] = {
     {-0.25f, -0.98f, 0.78f}, { 0.18f, -0.91f, 1.16f}, {-0.31f, -0.39f, 1.07f},
     { 0.23f, -0.43f, 0.83f}, {-0.05f,  0.02f, 1.22f}, { 0.35f,  0.29f, 0.76f},
     {-0.28f,  0.54f, 0.87f}, { 0.10f,  0.87f, 1.10f},
+};
+
+// Mind is a wide, squat hexagonal cut, the only stone broader than it is tall.
+constexpr StoneOutlinePoint kMindOutline[] = {
+    { 0.00f, -0.86f}, { 0.52f, -0.72f}, { 0.98f, -0.38f}, { 1.18f,  0.00f},
+    { 0.98f,  0.38f}, { 0.52f,  0.72f}, { 0.00f,  0.86f}, {-0.52f,  0.72f},
+    {-0.98f,  0.38f}, {-1.18f,  0.00f}, {-0.98f, -0.38f}, {-0.52f, -0.72f},
+};
+
+// Seeds laid out in horizontal bands, which reads as a wide table facet across the middle.
+constexpr StoneFacetSeed kMindFacets[] = {
+    {-0.72f, -0.30f, 0.80f}, { 0.00f, -0.44f, 1.18f}, { 0.72f, -0.30f, 0.88f},
+    {-0.88f,  0.12f, 1.10f}, { 0.00f,  0.02f, 1.32f}, { 0.88f,  0.12f, 1.04f},
+    {-0.44f,  0.52f, 0.76f}, { 0.46f,  0.52f, 0.84f},
+};
+
+// Reality is aether rather than a cut stone, so its outline is deliberately lopsided: the
+// upper point is drawn out and pushed off centre, and the left flank bulges. It is the only
+// silhouette here that is not close to symmetric about either axis.
+constexpr StoneOutlinePoint kRealityOutline[] = {
+    { 0.10f, -1.24f}, { 0.44f, -0.86f}, { 0.72f, -0.44f}, { 0.86f,  0.06f},
+    { 0.74f,  0.52f}, { 0.44f,  0.88f}, { 0.02f,  1.06f}, {-0.40f,  0.94f},
+    {-0.76f,  0.62f}, {-0.94f,  0.14f}, {-0.82f, -0.34f}, {-0.56f, -0.74f},
+    {-0.24f, -1.02f},
+};
+
+// Uneven, off axis seeds so the interior swirls instead of resolving into clean planes,
+// matching what the stone does to the particles around it.
+constexpr StoneFacetSeed kRealityFacets[] = {
+    {-0.34f, -0.74f, 1.14f}, { 0.30f, -0.60f, 0.78f}, {-0.62f, -0.16f, 0.86f},
+    { 0.20f, -0.06f, 1.28f}, { 0.58f,  0.26f, 0.82f}, {-0.36f,  0.42f, 1.08f},
+    { 0.12f,  0.66f, 0.75f}, {-0.06f,  0.14f, 1.20f},
+};
+
+// Time is a cushion cut: flat edges with pronounced corners at the diagonals. Corners reach
+// 0.99 where the edge midpoints sit at 0.78, which is what keeps it reading as a square
+// rather than collapsing back toward the circle the unfinished stones used.
+constexpr StoneOutlinePoint kTimeOutline[] = {
+    { 0.00f, -0.78f}, { 0.42f, -0.72f}, { 0.70f, -0.70f}, { 0.78f, -0.34f},
+    { 0.80f,  0.00f}, { 0.78f,  0.34f}, { 0.70f,  0.70f}, { 0.42f,  0.72f},
+    { 0.00f,  0.78f}, {-0.42f,  0.72f}, {-0.70f,  0.70f}, {-0.78f,  0.34f},
+    {-0.80f,  0.00f}, {-0.78f, -0.34f}, {-0.70f, -0.70f}, {-0.42f, -0.72f},
+};
+
+// One bright centre cell ringed by alternating light and dark quadrants, so the face reads
+// as a dial.
+constexpr StoneFacetSeed kTimeFacets[] = {
+    { 0.00f,  0.00f, 1.32f}, {-0.48f, -0.48f, 0.79f}, { 0.48f, -0.48f, 1.12f},
+    { 0.48f,  0.48f, 0.81f}, {-0.48f,  0.48f, 1.10f}, { 0.00f, -0.60f, 0.94f},
+    { 0.60f,  0.00f, 0.87f}, { 0.00f,  0.60f, 1.05f},
 };
 
 template <size_t N, size_t M>
@@ -246,6 +328,9 @@ Stones::Stones() {
     setVisual(m_stones[static_cast<size_t>(StoneKind::Power)], kPowerOutline, kPowerFacets);
     setVisual(m_stones[static_cast<size_t>(StoneKind::Soul)], kSoulOutline, kSoulFacets);
     setVisual(m_stones[static_cast<size_t>(StoneKind::Space)], kSpaceOutline, kSpaceFacets);
+    setVisual(m_stones[static_cast<size_t>(StoneKind::Mind)], kMindOutline, kMindFacets);
+    setVisual(m_stones[static_cast<size_t>(StoneKind::Reality)], kRealityOutline, kRealityFacets);
+    setVisual(m_stones[static_cast<size_t>(StoneKind::Time)], kTimeOutline, kTimeFacets);
 }
 
 void Stones::update(double time, float dt) {
@@ -352,11 +437,20 @@ void Stones::recordHistory(const ParticleSystem& particles) {
     if (m_historyFilled < kHistorySlots) ++m_historyFilled;
 }
 
-void Stones::applyForces(ParticleSystem& particles, float dt) {
+void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
+                         float dt) {
     const Vec3 soulPos  = stone(StoneKind::Soul).position;
     const Vec3 powerPos = stone(StoneKind::Power).position;
     const Vec3 timePos  = stone(StoneKind::Time).position;
     const Vec3 spaceEntry = stone(StoneKind::Space).position;
+    const Vec3 realityPos = stone(StoneKind::Reality).position;
+    const Vec3 mindPos    = stone(StoneKind::Mind).position;
+
+    // Reality twists about its own orbit tangent, so the axis sweeps as the stone travels
+    // and the warp never settles into the same orientation twice.
+    const Vec3 realityAxis = normalize(cross(realityPos, Vec3{0.0f, 1.0f, 0.0f}));
+
+    const int gridDim = grid.dim();
     const Vec3 spaceExit  = m_spaceExit;
 
     Vec3 entryN, entryT, entryB;
@@ -473,6 +567,90 @@ void Stones::applyForces(ParticleSystem& particles, float dt) {
                     const float shell =
                         std::exp(-(delta * delta) / (2.0f * kShockShellWidth * kShockShellWidth));
                     vel += dir * (kShockImpulse * shell * localDt);
+                }
+            }
+        }
+
+        // Reality: rotate the offset from the stone about its axis, by an angle that dies
+        // off with distance. Nothing is added to velocity, the particle is moved, which is
+        // what makes this a warp of space rather than a force acting through it.
+        {
+            const Vec3 offset = pos - realityPos;
+            const float distanceSq = lengthSq(offset);
+            if (distanceSq < kRealityRadius * kRealityRadius) {
+                const float falloff = 1.0f - std::sqrt(distanceSq) / kRealityRadius;
+                const float angle = kRealityTwist * falloff * falloff * localDt;
+
+                pos = realityPos + rotateAboutAxis(offset, realityAxis, angle);
+                vel = rotateAboutAxis(vel, realityAxis, angle);
+
+                const float tint = kRealityTintRate * falloff * localDt;
+                const float blend = tint > 1.0f ? 1.0f : tint;
+                particles.cr[i] += (kRealityTint[0] - particles.cr[i]) * blend;
+                particles.cg[i] += (kRealityTint[1] - particles.cg[i]) * blend;
+                particles.cb[i] += (kRealityTint[2] - particles.cb[i]) * blend;
+            }
+        }
+
+        // Mind: take the flock over. Cohesion and alignment are weighed against the mean of
+        // the surrounding cells, separation against this particle's own cell, so the whole
+        // rule set costs 27 cell reads instead of a pass over every neighbour.
+        {
+            const Vec3 toMind = pos - mindPos;
+            if (lengthSq(toMind) < kMindRadius * kMindRadius) {
+                const int cx = grid.axisCell(pos.x);
+                const int cy = grid.axisCell(pos.y);
+                const int cz = grid.axisCell(pos.z);
+
+                Vec3 neighbourPosition;
+                Vec3 neighbourVelocity;
+                int neighbourCount = 0;
+
+                for (int z = cz - 1; z <= cz + 1; ++z) {
+                    if (z < 0 || z >= gridDim) continue;
+                    for (int y = cy - 1; y <= cy + 1; ++y) {
+                        if (y < 0 || y >= gridDim) continue;
+                        for (int x = cx - 1; x <= cx + 1; ++x) {
+                            if (x < 0 || x >= gridDim) continue;
+
+                            const CellSummary& c = grid.cell(grid.cellIndex(x, y, z));
+                            if (c.count == 0) continue;
+
+                            const float weight = static_cast<float>(c.count);
+                            neighbourPosition += c.meanPosition * weight;
+                            neighbourVelocity += c.meanVelocity * weight;
+                            neighbourCount += c.count;
+                        }
+                    }
+                }
+
+                if (neighbourCount > 0) {
+                    const float inverse = 1.0f / static_cast<float>(neighbourCount);
+                    const Vec3 flockCenter = neighbourPosition * inverse;
+                    const Vec3 flockHeading = neighbourVelocity * inverse;
+
+                    vel += (flockCenter - pos) * (kMindCohesion * localDt);
+                    vel += (flockHeading - vel) * (kMindAlignment * localDt);
+
+                    const CellSummary& own = grid.cell(grid.cellIndex(cx, cy, cz));
+                    if (own.count > 1) {
+                        const Vec3 crowding = pos - own.meanPosition;
+                        const float spread = length(crowding);
+                        if (spread > 1e-4f) {
+                            // Bounded rather than an inverse square. A 1/r term inside a
+                            // cell this small peaks around a hundred times the alignment
+                            // term and shoves every particle a different way, which wipes
+                            // out the alignment the flock is supposed to be built on.
+                            const float crowd = 1.0f / (1.0f + spread * kMindSeparationFalloff);
+                            vel += crowding * (kMindSeparation * crowd * localDt / spread);
+                        }
+                    }
+
+                    // Flocking is a positive feedback loop: alignment pulls a particle
+                    // toward the group's velocity, which then raises the group's velocity.
+                    // Without a ceiling the whole flock accelerates until it is a streak.
+                    const float speed = length(vel);
+                    if (speed > kMindSpeedLimit) vel *= kMindSpeedLimit / speed;
                 }
             }
         }

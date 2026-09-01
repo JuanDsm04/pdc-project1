@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "math3d.hpp"
+#include "grid.hpp"
 #include "particles.hpp"
 
 enum class StoneKind { Space, Mind, Reality, Power, Time, Soul, Count };
@@ -73,11 +74,11 @@ public:
     // bodies and a handful of shockwave fronts is negligible next to the particle loop.
     void update(double time, float dt);
 
-    // Soul's gravity and capture, and Power's shockwave impulses, applied to every
-    // particle in one pass. Parallel over particles: each iteration only touches its own
-    // particle, plus a shared reduction that counts how many particles Soul currently
-    // holds captured.
-    void applyForces(ParticleSystem& particles, float dt);
+    // Every stone's power applied to every particle in one pass. Parallel over particles:
+    // an iteration only ever touches its own particle, plus two shared counters that are
+    // integer reductions and so stay exact. The grid is read only here; Mind consults its
+    // cell summaries and nothing writes back into it.
+    void applyForces(ParticleSystem& particles, const SpatialGrid& grid, float dt);
 
     const Stone& stone(StoneKind kind) const { return m_stones[static_cast<size_t>(kind)]; }
     const std::vector<Stone>& all() const { return m_stones; }
