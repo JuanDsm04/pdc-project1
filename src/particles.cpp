@@ -53,6 +53,7 @@ void ParticleSystem::reset(int count, uint32_t seed) {
         // Step 14 sorts particles into exactly these ranges, so seeding them already grouped
         // means the very first frame is in the layout the rest of the pipeline expects.
         const int owner = static_cast<int>(static_cast<long long>(i) * kChamberCount / count);
+        chamber[i] = static_cast<uint8_t>(owner);
         const Vec3 center = chamberCenter(owner);
 
         // Cube root of a uniform sample spreads points evenly through the volume of the
@@ -81,11 +82,51 @@ void ParticleSystem::reset(int count, uint32_t seed) {
         cg[i] = kStoneColor[owner][1];
         cb[i] = kStoneColor[owner][2];
     }
+
+    // Spawning already lays the chambers out in order, so this is a no op on a fresh run.
+    // It is called anyway so the ranges are established by the one piece of code that owns
+    // them, rather than being an invariant that happens to hold because of how reset writes
+    // its loop.
+    regroup();
 }
 
 // Every iteration only reads and writes its own index, so there is nothing to
 // synchronize: no shared accumulator, no reduction, no order dependence between
 // particles. That is what makes this loop safe to hand straight to OpenMP.
+namespace {
+
+// Permuting in place would need cycle chasing and a visited set. A scratch buffer and a
+// gather is a single linear pass per attribute, and the buffers are reused across calls.
+template <typename T>
+void gather(std::vector<T>& values, std::vector<T>& scratch, const std::vector<int>& order) {
+    const int count = static_cast<int>(order.size());
+    scratch.resize(count);
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = 0; i < count; ++i) scratch[i] = values[order[i]];
+
+    values.swap(scratch);
+}
+
+}  // namespace
+
+void ParticleSystem::regroup() {
+    m_partition.build(chamber.data(), m_count, kChamberCount);
+    const std::vector<int>& order = m_partition.order();
+
+    gather(px, m_scratchFloat, order); gather(py, m_scratchFloat, order);
+    gather(pz, m_scratchFloat, order);
+    gather(vx, m_scratchFloat, order); gather(vy, m_scratchFloat, order);
+    gather(vz, m_scratchFloat, order);
+    gather(cr, m_scratchFloat, order); gather(cg, m_scratchFloat, order);
+    gather(cb, m_scratchFloat, order);
+    gather(timeScale, m_scratchFloat, order);
+    gather(captured, m_scratchByte, order);
+    gather(chamber, m_scratchByte, order);
+
+    for (int c = 0; c <= kChamberCount; ++c) m_chamberStart[c] = m_partition.rangeBegin(c);
+}
+
 void ParticleSystem::integrate(float dt) {
     Vec3 centers[kChamberCount];
     for (int c = 0; c < kChamberCount; ++c) centers[c] = chamberCenter(c);

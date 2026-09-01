@@ -5,6 +5,7 @@
 
 #include "chambers.hpp"
 #include "math3d.hpp"
+#include "partition.hpp"
 
 // Half width of the cube that bounds everything. No longer the wall particles bounce off,
 // which is now each chamber's own sphere; this is kept for the merge phase, when the chamber
@@ -21,7 +22,23 @@ public:
     void reset(int count, uint32_t seed);
     void integrate(float dt);
 
+    // Reorders every per particle array so particles are grouped by chamber, and records
+    // where each chamber's block starts. Step 15 launches one loop per block, which is what
+    // removes the six way gate from the force pass.
+    //
+    // Any caller must treat particle indices as invalidated afterwards. Nothing outside this
+    // class may hold an index across a regroup; the Time stone's position history is exactly
+    // such a thing, which is why the merge at step 16 has to drop it when it reassigns
+    // chambers.
+    void regroup();
+
     int count() const { return m_count; }
+
+    int chamberBegin(int chamber) const { return m_chamberStart[chamber]; }
+    int chamberEnd(int chamber) const { return m_chamberStart[chamber + 1]; }
+    int chamberSize(int chamber) const {
+        return m_chamberStart[chamber + 1] - m_chamberStart[chamber];
+    }
 
     std::vector<float> px, py, pz;
     std::vector<float> vx, vy, vz;
@@ -45,4 +62,9 @@ public:
 
 private:
     int m_count = 0;
+    int m_chamberStart[kChamberCount + 1] = {};
+
+    KeyPartition m_partition;
+    std::vector<float>   m_scratchFloat;
+    std::vector<uint8_t> m_scratchByte;
 };
