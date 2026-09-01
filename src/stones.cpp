@@ -24,20 +24,37 @@ const OrbitParams kOrbits[6] = {
     {1.00f, 0.32f, 0.03f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
 };
 
-Vec3 orbitPosition(const OrbitParams& o, double time) {
+// A stone no longer crosses the whole world. It drifts on a small orbit inside its own
+// chamber, which keeps it moving without letting it wander into anyone else's globe. The
+// authored orbitRadius and bob are reused as shape, scaled down to the chamber.
+constexpr float kStoneOrbitScale = 0.30f;
+constexpr float kStoneBobScale   = 0.22f;
+
+Vec3 orbitPosition(const OrbitParams& o, double time, int chamber) {
     const float angle = static_cast<float>(time) * o.orbitSpeed + o.phase;
-    return {std::cos(angle) * o.orbitRadius, std::sin(angle * 1.7f + o.phase) * o.bob,
-            std::sin(angle) * o.orbitRadius};
+    const Vec3 local = {std::cos(angle) * o.orbitRadius * kChamberRadius * kStoneOrbitScale,
+                        std::sin(angle * 1.7f + o.phase) * o.bob * kChamberRadius * kStoneBobScale,
+                        std::sin(angle) * o.orbitRadius * kChamberRadius * kStoneOrbitScale};
+    return chamberCenter(chamber) + local;
 }
 
 // Soul: particles inside kCaptureRadius are held in a circular orbit instead of left to
 // free fall, which is what "capture" means here. kOuterRadius is wider, so particles get a
 // plain inverse square pull toward the stone before they are close enough to be captured,
 // instead of a hard edge where nothing happens until they cross the capture line.
-constexpr float kSoulCaptureRadius = 0.45f;
-constexpr float kSoulOuterRadius   = 0.90f;
-constexpr float kSoulSoftening     = 0.05f;
-constexpr float kSoulG             = 1.10f;
+// Every length below is written as a fraction of the chamber rather than an absolute world
+// distance. The stones were originally tuned against a box more than twice this wide, and
+// left alone their influence radii would each swallow a whole chamber whole, flattening the
+// structure that makes them tell apart: no funnel, no bubble edge, no shell, just six
+// uniformly affected globes.
+constexpr float kSoulCaptureRadius = kChamberRadius * 0.36f;
+constexpr float kSoulOuterRadius   = kChamberRadius * 0.78f;
+constexpr float kSoulSoftening     = kChamberRadius * 0.04f;
+
+// Gravity is not a length, so it does not scale with one. Orbital speed goes as sqrt(G/r),
+// so holding the visual orbit rate steady while r shrinks means G falls with the cube of
+// the scale, not linearly.
+constexpr float kSoulG             = 0.095f;
 
 // How fast a captured particle's velocity is corrected toward a clean circular orbit.
 // Higher settles particles into a tight ring faster; too high and the correction itself
@@ -55,16 +72,16 @@ constexpr double kSoulReleaseDuration = 1.0;
 // volume. The impulse is a thin gaussian shell around the front's current radius rather
 // than a hard step, so it reads as a wave passing through instead of a sphere popping.
 constexpr double kShockSpawnPeriod = 0.9;
-constexpr float  kShockSpeed       = 1.3f;
-constexpr float  kShockMaxRadius   = 2.0f;
-constexpr float  kShockShellWidth  = 0.08f;
-constexpr float  kShockImpulse     = 1.6f;
+constexpr float  kShockSpeed       = kChamberRadius * 1.05f;
+constexpr float  kShockMaxRadius   = kChamberRadius * 2.05f;
+constexpr float  kShockShellWidth  = kChamberRadius * 0.065f;
+constexpr float  kShockImpulse     = 0.70f;
 
 // Space: a one way wormhole. Only the entry mouth, which sits on the stone itself,
 // swallows particles; the exit only emits. A two way pair would trap a particle bouncing
 // between the mouths forever, since it always arrives inside the other one's radius.
 constexpr double kSpaceJumpPeriod = 3.5;
-constexpr float  kSpaceJumpRange  = 0.85f;
+constexpr float  kSpaceJumpRange  = kChamberRadius * 0.42f;
 
 // Without an inflow the portal only catches whatever happens to wander into it, so nothing
 // on screen connects the two mouths and the stones just look like they are drifting. Pulling
@@ -72,14 +89,14 @@ constexpr float  kSpaceJumpRange  = 0.85f;
 // entry, and since velocity carries through the portal, an equally visible spray leaving the
 // exit. The swirl term makes them spiral in rather than fall straight, which reads as a
 // vortex instead of a smudge.
-constexpr float kSpaceInflowRadius = 0.85f;
-constexpr float kSpaceInflowPull   = 2.30f;
-constexpr float kSpaceInflowSwirl  = 1.60f;
+constexpr float kSpaceInflowRadius = kChamberRadius * 1.30f;
+constexpr float kSpaceInflowPull   = 1.00f;
+constexpr float kSpaceInflowSwirl  = 0.70f;
 
 // Both mouths must stay at least this far from the origin. The exit is the entry negated,
 // so a stone drifting onto the origin would put the two mouths on top of each other and a
 // particle would teleport into the entry it just left, every step, forever.
-constexpr float kSpaceMinOriginDistance = 0.55f;
+constexpr float kSpaceMinOriginDistance = kChamberRadius * 0.30f;
 
 // Converts teleports per particle into the 0 to 1 range the mouths pulse over, then eases
 // toward it so the flare tracks throughput without flickering frame to frame.
@@ -89,7 +106,7 @@ constexpr float kSpaceActivityEase  = 0.12f;
 // Time: dt is scaled down toward kTimeMinScale at the center of the bubble, so particles
 // crossing it visibly wade through it and speed back up on the far side. Anything at or
 // below zero would freeze them permanently rather than slow them.
-constexpr float  kTimeBubbleRadius = 0.60f;
+constexpr float  kTimeBubbleRadius = kChamberRadius * 0.66f;
 constexpr float  kTimeMinScale     = 0.10f;
 
 // Position snapshots for the rewind, kept every kHistoryStride physics steps. Sixteen
@@ -108,7 +125,7 @@ constexpr double kTimeRewindDuration = 0.45;
 // per particle sine and cosine are the point of this stone, not an accident: it is the
 // highest FLOP kernel of the six and the one that shows what happens when a parallel loop
 // is arithmetic bound instead of memory bound.
-constexpr float kRealityRadius = 0.80f;
+constexpr float kRealityRadius = kChamberRadius * 1.30f;
 constexpr float kRealityTwist  = 3.10f;
 
 // Warped matter is dragged toward a hot saturated core colour. Reality is the only stone
@@ -120,12 +137,19 @@ constexpr float kRealityTint[3]  = {1.00f, 0.13f, 0.17f};
 // neighbours. Twenty seven cell reads per particle is tractable where five thousand pairwise
 // distance checks is not, and it keeps the irregular, cache unfriendly access pattern that
 // makes this stone worth measuring separately.
-constexpr float kMindRadius     = 0.75f;
-constexpr float kMindCohesion   = 1.45f;
+constexpr float kMindRadius     = kChamberRadius * 1.30f;
+// Cohesion is deliberately weak. Because the flock is now sealed in a chamber and the 27
+// cell neighbourhood spans most of it, cohesion is effectively global: every particle pulls
+// toward one point and nothing resists at range, so a strong term collapses the whole flock
+// into a knot a tenth of the globe wide. The vortex term supplies what stops that, the same
+// way a real flock or a galaxy resists collapse, by circulating rather than by pushing back.
+constexpr float kMindCohesion   = 0.55f;
+constexpr float kMindVortex     = 0.70f;
 constexpr float kMindAlignment  = 2.10f;
-constexpr float kMindSeparation = 0.55f;
-constexpr float kMindSeparationFalloff = 12.0f;
-constexpr float kMindSpeedLimit = 0.95f;
+constexpr float kMindSeparation = 0.30f;
+// A reciprocal of a length, so it scales the other way from every other constant here.
+constexpr float kMindSeparationFalloff = 27.0f;
+constexpr float kMindSpeedLimit = 0.42f;
 
 // Rodrigues rotation of a vector about a unit axis. Reality is the only caller, but keeping
 // it out of the loop body keeps that loop readable.
@@ -320,9 +344,9 @@ Stones::Stones() {
     m_stones.resize(6);
     for (size_t i = 0; i < 6; ++i) {
         m_stones[i].kind = static_cast<StoneKind>(i);
-        m_stones[i].r = kOrbits[i].r;
-        m_stones[i].g = kOrbits[i].g;
-        m_stones[i].b = kOrbits[i].b;
+        m_stones[i].r = kStoneColor[i][0];
+        m_stones[i].g = kStoneColor[i][1];
+        m_stones[i].b = kStoneColor[i][2];
     }
 
     setVisual(m_stones[static_cast<size_t>(StoneKind::Power)], kPowerOutline, kPowerFacets);
@@ -335,7 +359,7 @@ Stones::Stones() {
 
 void Stones::update(double time, float dt) {
     for (size_t i = 0; i < m_stones.size(); ++i) {
-        m_stones[i].position = orbitPosition(kOrbits[i], time);
+        m_stones[i].position = orbitPosition(kOrbits[i], time, static_cast<int>(i));
     }
 
     for (ShockFront& front : m_shockFronts) front.age += dt;
@@ -371,15 +395,16 @@ void Stones::update(double time, float dt) {
     Stone& space = m_stones[static_cast<size_t>(StoneKind::Space)];
     space.position += m_spaceJumpOffset;
 
-    // Push the entry off the origin before anything else. Both mouths are the same point
-    // mirrored, so an entry sitting near the origin puts them inside one another and a
-    // particle teleports into the mouth it just left on every step.
-    const float originDistance = length(space.position);
-    if (originDistance < kSpaceMinOriginDistance) {
-        const Vec3 direction = originDistance > 1e-4f
-                                   ? space.position * (1.0f / originDistance)
-                                   : Vec3{1.0f, 0.0f, 0.0f};
-        space.position = direction * kSpaceMinOriginDistance;
+    // Both mouths are the same point mirrored through the chamber centre, so an entry
+    // sitting on that centre puts them inside one another and a particle teleports into the
+    // mouth it just left on every step. Push it off the centre first.
+    const Vec3 spaceHome = chamberCenter(static_cast<int>(StoneKind::Space));
+    const Vec3 fromHome = space.position - spaceHome;
+    const float homeDistance = length(fromHome);
+    if (homeDistance < kSpaceMinOriginDistance) {
+        const Vec3 direction =
+            homeDistance > 1e-4f ? fromHome * (1.0f / homeDistance) : Vec3{1.0f, 0.0f, 0.0f};
+        space.position = spaceHome + direction * kSpaceMinOriginDistance;
     }
 
     // The orbit and the jump offset together reach past the wall the particles bounce off,
@@ -387,15 +412,15 @@ void Stones::update(double time, float dt) {
     // would emit particles into a region the integrator immediately clamps, pinning them
     // flat against the wall instead of letting them stream out of the ring. A whole mouth
     // radius of margin keeps the opening itself clear of the wall, not just its center.
-    const float reach = kWorldHalfExtent - kSpacePortalRadius;
-    space.position.x = std::fmax(-reach, std::fmin(reach, space.position.x));
-    space.position.y = std::fmax(-reach, std::fmin(reach, space.position.y));
-    space.position.z = std::fmax(-reach, std::fmin(reach, space.position.z));
+    const float reach = kChamberRadius - kSpacePortalRadius;
+    const Vec3 offset = space.position - spaceHome;
+    const float offsetLength = length(offset);
+    if (offsetLength > reach) space.position = spaceHome + offset * (reach / offsetLength);
 
-    // The exit mouth sits opposite the entry through the origin, which keeps the two as far
-    // apart as the volume allows and makes the jump across obvious on screen. Negating a
-    // clamped position keeps the exit inside the box for free.
-    m_spaceExit = -space.position;
+    // The exit sits opposite the entry through the chamber centre, as far from it as the
+    // globe allows. Mirroring a position that is already inside the chamber keeps the exit
+    // inside it too, so nothing can be emitted through a wall.
+    m_spaceExit = spaceHome + (spaceHome - space.position);
 
     m_spaceActivity += (m_spaceActivityTarget - m_spaceActivity) * kSpaceActivityEase;
 
@@ -494,11 +519,20 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
         Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
 
+        // A particle is only ever touched by the stone whose chamber it belongs to. This is
+        // the whole point of the chambers: with every stone acting on every particle, six
+        // forces superposed into drift and none of them was identifiable.
+        //
+        // Written as one loop with six gates for now, which is the readable form and gives
+        // step 15 a measurable baseline. Step 15 sorts the particles and splits this into
+        // six loops over contiguous ranges, where the gate disappears entirely.
+        const int owner = particles.chamber[i];
+
         // Time: everything below integrates against this particle's own dilated step, not
         // the global one, so a slowed particle is slowed for every stone at once rather
         // than only for its own motion.
         float scale = 1.0f;
-        {
+        if (owner == static_cast<int>(StoneKind::Time)) {
             const Vec3 toTime = pos - timePos;
             const float distanceSq = lengthSq(toTime);
             if (distanceSq < kTimeBubbleRadius * kTimeBubbleRadius) {
@@ -511,7 +545,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         const float localDt = dt * scale;
 
         // Soul
-        {
+        if (owner == static_cast<int>(StoneKind::Soul)) {
             const Vec3 toStone = soulPos - pos;
             const float r = length(toStone);
 
@@ -556,7 +590,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         }
 
         // Power
-        if (frontCount > 0) {
+        if (owner == static_cast<int>(StoneKind::Power) && frontCount > 0) {
             const Vec3 toStone = pos - powerPos;
             const float r = length(toStone);
             if (r > 1e-5f) {
@@ -574,7 +608,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         // Reality: rotate the offset from the stone about its axis, by an angle that dies
         // off with distance. Nothing is added to velocity, the particle is moved, which is
         // what makes this a warp of space rather than a force acting through it.
-        {
+        if (owner == static_cast<int>(StoneKind::Reality)) {
             const Vec3 offset = pos - realityPos;
             const float distanceSq = lengthSq(offset);
             if (distanceSq < kRealityRadius * kRealityRadius) {
@@ -595,7 +629,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         // Mind: take the flock over. Cohesion and alignment are weighed against the mean of
         // the surrounding cells, separation against this particle's own cell, so the whole
         // rule set costs 27 cell reads instead of a pass over every neighbour.
-        {
+        if (owner == static_cast<int>(StoneKind::Mind)) {
             const Vec3 toMind = pos - mindPos;
             if (lengthSq(toMind) < kMindRadius * kMindRadius) {
                 const int cx = grid.axisCell(pos.x);
@@ -629,8 +663,10 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
                     const Vec3 flockCenter = neighbourPosition * inverse;
                     const Vec3 flockHeading = neighbourVelocity * inverse;
 
-                    vel += (flockCenter - pos) * (kMindCohesion * localDt);
+                    const Vec3 toCenter = flockCenter - pos;
+                    vel += toCenter * (kMindCohesion * localDt);
                     vel += (flockHeading - vel) * (kMindAlignment * localDt);
+                    vel += cross(Vec3{0.0f, 1.0f, 0.0f}, toCenter) * (kMindVortex * localDt);
 
                     const CellSummary& own = grid.cell(grid.cellIndex(cx, cy, cz));
                     if (own.count > 1) {
@@ -659,7 +695,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         // and given a sideways kick around the portal axis, so the cloud visibly spirals
         // into the mouth. Velocity is carried through the portal unchanged, so the same
         // motion becomes a spray on the far side and the two events read as one.
-        {
+        if (owner == static_cast<int>(StoneKind::Space)) {
             const Vec3 toEntry = spaceEntry - pos;
             const float distanceSq = lengthSq(toEntry);
             if (distanceSq < kSpaceInflowRadius * kSpaceInflowRadius && distanceSq > 1e-8f) {
@@ -677,7 +713,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
         // Space: crossing the entry mouth moves the particle to the exit and re-expresses
         // both offset and velocity in the exit's frame, so it leaves the far mouth pointing
         // the way it went in relative to the portal rather than snapping to a fixed heading.
-        {
+        if (owner == static_cast<int>(StoneKind::Space)) {
             const Vec3 relative = pos - spaceEntry;
             if (lengthSq(relative) < kSpacePortalRadius * kSpacePortalRadius) {
                 const float a = dot(relative, entryN);
@@ -694,7 +730,7 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
             }
         }
 
-        if (rewinding) {
+        if (rewinding && owner == static_cast<int>(StoneKind::Time)) {
             const Vec3 toTime = pos - timePos;
             if (lengthSq(toTime) < kTimeBubbleRadius * kTimeBubbleRadius) {
                 const Vec3 newer = {newerX[i], newerY[i], newerZ[i]};

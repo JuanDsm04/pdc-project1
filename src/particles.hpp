@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <vector>
 
+#include "chambers.hpp"
 #include "math3d.hpp"
 
-// Half width of the cube the simulation is confined to, in world units.
-constexpr float kWorldHalfExtent = 1.25f;
+// Half width of the cube that bounds everything. No longer the wall particles bounce off,
+// which is now each chamber's own sphere; this is kept for the merge phase, when the chamber
+// walls drop and only an outer limit remains.
+constexpr float kWorldHalfExtent = kRingExtent;
 
 // Particles are stored as a structure of arrays rather than an array of structs. The hot
 // loops touch positions and velocities in separate passes, so keeping each attribute in
@@ -34,6 +37,11 @@ public:
     // particle's state for the integrate loop's cache access pattern to stay coherent, the
     // same reasoning that keeps every other per particle attribute in its own array.
     std::vector<uint8_t> captured;
+
+    // Which chamber owns this particle. Drives confinement, colour, and which stone's force
+    // is allowed to touch it, so it is the single source of ownership rather than three
+    // separate notions that could drift apart.
+    std::vector<uint8_t> chamber;
 
 private:
     int m_count = 0;

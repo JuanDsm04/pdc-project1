@@ -51,7 +51,7 @@ constexpr float kRewindFlare = 2.2f;
 
 // Distance the orbits are tuned around. Attenuation is expressed relative to it so that
 // glows read as receding without the near ones saturating the whole frame.
-constexpr float kReferenceDepth = 3.2f;
+constexpr float kReferenceDepth = 5.4f;
 
 // World space radius of a single particle's splat, before projection.
 constexpr float kParticleWorldRadius = 0.012f;
@@ -108,7 +108,9 @@ bool App::init(int width, int height) {
 
     // Cells a little wider than a particle is likely to travel in one step, so a flock's
     // neighbourhood is genuinely covered by the 27 cells Mind reads.
-    m_grid.configure(kWorldHalfExtent, 12);
+    // The grid now has to span the whole ring, not one box. Most of it is the empty gaps
+    // between globes, which costs a walk over empty cells but keeps a single flat index.
+    m_grid.configure(kRingExtent, 28);
 
     if (!m_hud.init()) return false;
 

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "math3d.hpp"
+#include "chambers.hpp"
 #include "grid.hpp"
 #include "particles.hpp"
 
@@ -11,7 +12,7 @@ enum class StoneKind { Space, Mind, Reality, Power, Time, Soul, Count };
 // Mouth radius of the Space stone's wormhole. Shared with the renderer so the ring drawn
 // at the exit is exactly the opening particles actually come out of, rather than a
 // decorative circle that drifts out of step with the physics.
-constexpr float kSpacePortalRadius = 0.24f;
+constexpr float kSpacePortalRadius = kChamberRadius * 0.21f;
 
 // The two finished stones use hand-authored, convex-ish outlines rather than a noisy
 // circle. Keeping the points in normalized screen space makes the silhouette cheap to

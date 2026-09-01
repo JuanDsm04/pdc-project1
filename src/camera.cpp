@@ -7,7 +7,7 @@ namespace {
 // the whole screen.
 constexpr float kNearPlane = 0.05f;
 
-constexpr float kOrbitRadius = 3.2f;
+constexpr float kOrbitRadius = 5.4f;
 constexpr float kOrbitSpeed  = 0.11f;
 
 }  // namespace
@@ -22,7 +22,9 @@ void Camera::setViewport(int width, int height, float verticalFovDegrees) {
 
 void Camera::update(double time) {
     const float angle = static_cast<float>(time * kOrbitSpeed);
-    const float height = 0.9f * std::sin(static_cast<float>(time * 0.07));
+    // Enough tilt to see the ring as a ring rather than edge on, without ever looking
+    // straight down at it.
+    const float height = 1.5f + 0.7f * std::sin(static_cast<float>(time * 0.07));
 
     m_position = {std::cos(angle) * kOrbitRadius, height, std::sin(angle) * kOrbitRadius};
 
