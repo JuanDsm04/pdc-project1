@@ -25,6 +25,7 @@ private:
     void projectParticles();
     void buildSplats();
     void drawStones();
+    void drawPortal();
 
     SDL_Window*   m_window   = nullptr;
     SDL_Renderer* m_renderer = nullptr;

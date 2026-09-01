@@ -33,10 +33,21 @@ constexpr float kGlowHaloStrength = 0.18f;
 constexpr float kGlowHaloSigmaScale = 0.24f;
 
 // Stands in for the --particles flag until the CLI lands at step 15.
-constexpr int      kDefaultParticleCount = 200;
+constexpr int      kDefaultParticleCount = 1000;
 constexpr uint32_t kDefaultSeed = 1337u;
 
 constexpr float kParticleBrightness = 0.9f;
+
+constexpr float kPortalBrightness = 2.6f;
+
+// How much the two wormhole mouths brighten at full throughput. Both use the same figure,
+// because them flaring in step is the cue that links the particles vanishing at one to the
+// particles appearing at the other.
+constexpr float kPortalFlare = 2.4f;
+constexpr float kPortalColor[3] = {0.20f, 0.45f, 1.00f};
+
+// How much brighter the Time stone burns during a rewind.
+constexpr float kRewindFlare = 2.2f;
 
 // Distance the orbits are tuned around. Attenuation is expressed relative to it so that
 // glows read as receding without the near ones saturating the whole frame.
@@ -237,6 +248,18 @@ void App::drawStones() {
         const float attenuation = ratio * ratio;
         float peak = 6.0f * (attenuation > 2.0f ? 2.0f : attenuation);
 
+        // Space flares in step with the exit ring whenever the wormhole is actually moving
+        // particles, so the two mouths read as one connected event.
+        if (stone.kind == StoneKind::Space) {
+            peak *= 1.0f + kPortalFlare * m_stones.spaceActivity();
+        }
+
+        // Time flares while it runs its bubble backwards, so the reversal has a visible
+        // cause on screen instead of particles inexplicably retracing their paths.
+        if (stone.kind == StoneKind::Time && m_stones.timeRewinding()) {
+            peak *= kRewindFlare;
+        }
+
         if (stone.kind == StoneKind::Soul) {
             const float fill = static_cast<float>(m_stones.soulCapturedCount()) /
                                static_cast<float>(m_particles.count());
@@ -284,6 +307,41 @@ void App::drawStones() {
     }
 }
 
+// The far mouth of Space's wormhole, drawn as a ring rather than a filled body so it reads
+// as an opening. Without it, particles swallowed at the stone would simply reappear across
+// the volume with nothing to connect the two events.
+void App::drawPortal() {
+    const Projected p = m_camera.project(m_stones.spaceExitPortal());
+    if (!p.visible) return;
+
+    const float ringRadius = kSpacePortalRadius * p.scale;
+    const float thickness = ringRadius * 0.16f;
+    const int span = static_cast<int>(ringRadius + thickness * 3.0f);
+    if (span < 1 || thickness < 1e-3f) return;
+
+    const float invTwoSigmaSq = 1.0f / (2.0f * thickness * thickness);
+    const float ratio = kReferenceDepth / p.depth;
+    const float attenuation = ratio * ratio;
+    const float flare = 1.0f + kPortalFlare * m_stones.spaceActivity();
+    const float peak =
+        kPortalBrightness * (attenuation > 2.0f ? 2.0f : attenuation) * flare;
+
+    const int cx = static_cast<int>(p.x);
+    const int cy = static_cast<int>(p.y);
+
+    for (int dy = -span; dy <= span; ++dy) {
+        for (int dx = -span; dx <= span; ++dx) {
+            const float fx = static_cast<float>(dx);
+            const float fy = static_cast<float>(dy);
+            const float offset = std::sqrt(fx * fx + fy * fy) - ringRadius;
+            const float intensity = peak * std::exp(-(offset * offset) * invTwoSigmaSq);
+
+            m_framebuffer.deposit(cx + dx, cy + dy, kPortalColor[0] * intensity,
+                                  kPortalColor[1] * intensity, kPortalColor[2] * intensity);
+        }
+    }
+}
+
 void App::render() {
     m_framebuffer.clear();
 
@@ -305,6 +363,7 @@ void App::render() {
 
     m_timer.begin(Stage::Glows);
     drawStones();
+    drawPortal();
     m_timer.end(Stage::Glows);
 
     m_timer.begin(Stage::Tonemap);

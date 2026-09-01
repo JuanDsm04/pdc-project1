@@ -24,6 +24,11 @@ public:
     std::vector<float> vx, vy, vz;
     std::vector<float> cr, cg, cb;
 
+    // Written by Stones::applyForces from the Time stone's dilation field, read by
+    // integrate. A particle deep inside Time's bubble advances at a fraction of the real
+    // step, which is what makes the slow motion sphere visible rather than merely stated.
+    std::vector<float> timeScale;
+
     // Set by Stones::applyForces when the Soul stone currently holds a particle in orbit.
     // Lives here rather than in Stones because it has to sit next to the rest of a
     // particle's state for the integrate loop's cache access pattern to stay coherent, the

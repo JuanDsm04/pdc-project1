@@ -7,6 +7,11 @@
 
 enum class StoneKind { Space, Mind, Reality, Power, Time, Soul, Count };
 
+// Mouth radius of the Space stone's wormhole. Shared with the renderer so the ring drawn
+// at the exit is exactly the opening particles actually come out of, rather than a
+// decorative circle that drifts out of step with the physics.
+constexpr float kSpacePortalRadius = 0.24f;
+
 // The two finished stones use hand-authored, convex-ish outlines rather than a noisy
 // circle. Keeping the points in normalized screen space makes the silhouette cheap to
 // rasterize while still allowing every stone to have a completely different aspect ratio.
@@ -58,8 +63,8 @@ struct ShockFront {
 };
 
 // Owns the six stones' positions and the forces the stones that already have physics
-// exert on the particle system. Space, Time, Reality and Mind still only move on their
-// scripted orbit for now; their powers arrive across steps 11 and 12.
+// exert on the particle system. Reality and Mind still only move on their scripted orbit
+// for now; their powers arrive at step 12.
 class Stones {
 public:
     Stones();
@@ -82,11 +87,51 @@ public:
     // before the HUD or a report surfaces the raw count.
     int soulCapturedCount() const { return m_soulCapturedCount; }
 
+    // Where particles swallowed by the Space stone come back out. Rendered as a ring so
+    // that a particle vanishing at one portal and reappearing here reads as a wormhole
+    // rather than as a glitch.
+    Vec3 spaceExitPortal() const { return m_spaceExit; }
+
+    // True while the Time stone is running its bubble backwards, so the renderer can tint
+    // the moment rather than leaving the reversal unexplained.
+    bool timeRewinding() const { return m_rewinding; }
+
+    // Particles the Space stone swallowed on the last step. Mirrors soulCapturedCount as a
+    // cheap way to confirm the portal is actually firing without watching the window.
+    int spaceTeleportCount() const { return m_spaceTeleportCount; }
+
+    // Smoothed share of the cloud crossing the wormhole, in roughly 0 to 1. Both mouths
+    // brighten with it, which is what ties the swallow and the emission together as one
+    // event on screen instead of two unrelated lights.
+    float spaceActivity() const { return m_spaceActivity; }
+
 private:
+    // Snapshots of every particle position, kept in a ring so the Time stone has a past to
+    // rewind into. Stored here rather than in ParticleSystem because Time is the only thing
+    // that reads it and integrate never touches it, so it would only pollute that loop's
+    // cache footprint. Laid out slot major, index [slot * count + particle].
+    void recordHistory(const ParticleSystem& particles);
+
     std::vector<Stone> m_stones;
     std::vector<ShockFront> m_shockFronts;
 
     double m_lastShockSpawn = -1e9;
     int    m_soulCapturedCount = 0;
     bool   m_releasing = false;
+
+    Vec3   m_spaceJumpOffset;
+    Vec3   m_spaceExit;
+    double m_lastSpaceJump = -1e9;
+    uint32_t m_spaceJumpCounter = 0;
+    int      m_spaceTeleportCount = 0;
+    float    m_spaceActivity = 0.0f;
+    float    m_spaceActivityTarget = 0.0f;
+
+    std::vector<float> m_historyX, m_historyY, m_historyZ;
+    int  m_historyCount = 0;   // particles the ring is currently sized for
+    int  m_historyFilled = 0;  // slots written so far, so a fresh run cannot read garbage
+    int  m_historyCursor = 0;  // next slot to write
+    int  m_historyStep = 0;
+    bool m_rewinding = false;
+    float m_rewindProgress = 0.0f;
 };

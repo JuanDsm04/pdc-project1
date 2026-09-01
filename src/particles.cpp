@@ -36,6 +36,7 @@ void ParticleSystem::reset(int count, uint32_t seed) {
     vx.resize(count); vy.resize(count); vz.resize(count);
     cr.resize(count); cg.resize(count); cb.resize(count);
     captured.assign(count, 0);
+    timeScale.assign(count, 1.0f);
 
     for (int i = 0; i < count; ++i) {
         uint32_t h = hashCombine(seed, static_cast<uint32_t>(i));
@@ -78,9 +79,11 @@ void ParticleSystem::reset(int count, uint32_t seed) {
 void ParticleSystem::integrate(float dt) {
     #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
     for (int i = 0; i < m_count; ++i) {
-        px[i] += vx[i] * dt;
-        py[i] += vy[i] * dt;
-        pz[i] += vz[i] * dt;
+        const float step = dt * timeScale[i];
+
+        px[i] += vx[i] * step;
+        py[i] += vy[i] * step;
+        pz[i] += vz[i] * step;
 
         bounceAxis(px[i], vx[i], kWorldHalfExtent);
         bounceAxis(py[i], vy[i], kWorldHalfExtent);
