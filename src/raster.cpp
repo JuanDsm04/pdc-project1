@@ -32,8 +32,11 @@ void Rasterizer::bin(const std::vector<Splat>& splats) {
         m_scratch.resize(numThreads, std::vector<std::vector<Splat>>(m_tileBins.size()));
     }
 
-    for (auto& perThread : m_scratch) {
-        for (auto& tile : perThread) tile.clear();
+    // Only active thread buffers participate. Clearing every buffer allocated for the
+    // configured maximum would charge the serial baseline for work belonging to threads
+    // it did not use and would distort the reported speedup.
+    for (int thread = 0; thread < numThreads; ++thread) {
+        for (auto& tile : m_scratch[thread]) tile.clear();
     }
 
     const int count = static_cast<int>(splats.size());
@@ -58,7 +61,8 @@ void Rasterizer::bin(const std::vector<Splat>& splats) {
     }
 
     for (auto& tile : m_tileBins) tile.clear();
-    for (const auto& perThread : m_scratch) {
+    for (int thread = 0; thread < numThreads; ++thread) {
+        const auto& perThread = m_scratch[thread];
         for (size_t tile = 0; tile < m_tileBins.size(); ++tile) {
             if (perThread[tile].empty()) continue;
             m_tileBins[tile].insert(m_tileBins[tile].end(), perThread[tile].begin(),

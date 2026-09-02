@@ -16,10 +16,10 @@ public:
     void shutdown();
 
     // Formats the FPS of the latest completed frame into the pending text, throttled
-    // internally so repeated calls between refreshes are cheap no-ops. Takes the FrameTimer
-    // rather than a bare number because the per stage timings it also tracks feed the
-    // benchmark CSV once step 16 lands, even though the HUD itself only shows FPS.
-    void update(const FrameTimer& timer);
+    // internally so repeated calls between refreshes are cheap no-ops. Showing mode,
+    // threads and N makes the sequential/parallel comparison visible during a live
+    // demonstration instead of relying on terminal state.
+    void update(const FrameTimer& timer, bool parallel, int threads, int particleCount);
 
     // Rebuilds the texture from the pending text if it changed since the last call, then
     // blits it. Texture creation needs the renderer, which is why this is split from
@@ -34,6 +34,7 @@ private:
     int m_texW = 0, m_texH = 0;
 
     std::string m_text;
+    bool   m_ttfInitialized = false;
     bool   m_dirty       = false;
     Uint32 m_lastUpdate  = 0;
 };

@@ -25,6 +25,7 @@ bool Hud::init() {
         std::fprintf(stderr, "TTF_Init failed: %s\n", TTF_GetError());
         return false;
     }
+    m_ttfInitialized = true;
 
     m_font = TTF_OpenFont(kFontPath, kFontSize);
     if (!m_font) {
@@ -40,10 +41,11 @@ void Hud::shutdown() {
     if (m_font) TTF_CloseFont(m_font);
     m_texture = nullptr;
     m_font = nullptr;
-    TTF_Quit();
+    if (m_ttfInitialized) TTF_Quit();
+    m_ttfInitialized = false;
 }
 
-void Hud::update(const FrameTimer& timer) {
+void Hud::update(const FrameTimer& timer, bool parallel, int threads, int particleCount) {
     const Uint32 now = SDL_GetTicks();
     if (m_lastUpdate != 0 && now - m_lastUpdate < kUpdateIntervalMs) return;
     m_lastUpdate = now;
@@ -51,8 +53,11 @@ void Hud::update(const FrameTimer& timer) {
     const float frameMs = timer.frameMs();
     const float fps = frameMs > 0.0f ? 1000.0f / frameMs : 0.0f;
 
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "fps %5.1f", fps);
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "fps       %7.1f\nmode      %s\nthreads   %7d\nparticles %7d",
+                  fps, parallel ? "parallel" : "serial", parallel ? threads : 1,
+                  particleCount);
 
     if (buf == m_text) return;
     m_text  = buf;
