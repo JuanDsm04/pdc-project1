@@ -53,4 +53,5 @@ private:
     std::vector<int> m_cellStart;   // exclusive prefix sum, cellCount + 1 entries
     std::vector<int> m_sorted;      // particle indices grouped by cell, ascending within one
     std::vector<int> m_histogram;   // per thread cell counts, [thread * cellCount + cell]
+    std::vector<int> m_cellTotals;  // counts summed across threads, one per cell
 };

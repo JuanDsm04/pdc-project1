@@ -31,7 +31,7 @@ public:
     // bin and rasterize are separate boundaries in the plan's frame pipeline, and folding
     // them into one call would hide which of the two is actually costing the frame time.
     void bin(const std::vector<Splat>& splats);
-    void rasterizeTiles(Framebuffer& framebuffer) const;
+    void rasterizeTiles(const std::vector<Splat>& splats, Framebuffer& framebuffer) const;
 
 private:
     static constexpr int kTileSize = 32;
@@ -39,11 +39,15 @@ private:
     int m_width = 0, m_height = 0;
     int m_tilesX = 0, m_tilesY = 0;
 
-    // Final per tile splat lists, consumed by rasterizeTiles.
-    std::vector<std::vector<Splat>> m_tileBins;
+    // Bins hold indices into the caller's splat array, not copies of the splats. A Splat is
+    // 32 bytes and a typical one lands in more than one tile, so copying them cost about
+    // 18 MB of traffic per frame between the scatter and the merge. Indices cut that by
+    // eight and leave the splat data itself read only and untouched, which is what turned
+    // binning from the least scalable stage in the frame into one that keeps up.
+    std::vector<std::vector<int>> m_tileBins;
 
     // Per thread scratch, reused across frames so binning does not reallocate every frame.
     // Indexed [thread][tile]. Grows if a later run asks for more threads than the machine
     // reported at startup.
-    std::vector<std::vector<std::vector<Splat>>> m_scratch;
+    std::vector<std::vector<std::vector<int>>> m_scratch;
 };

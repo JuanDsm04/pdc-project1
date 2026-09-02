@@ -54,20 +54,42 @@ void SpatialGrid::build(const ParticleSystem& particles) {
         }
     }
 
-    // Pass 2: exclusive prefix sum over cells, and within a cell over threads, so every
-    // thread learns exactly where its own particles for that cell begin. Serial, but it is
-    // a walk over cells rather than particles, so it does not scale with --particles.
+    // Pass 2: the exclusive prefix sum, split into three so the only serial part is a walk
+    // over cells alone.
+    //
+    // The obvious way to write this is one serial loop over cells with an inner loop over
+    // threads. That is cells times threads of serial work, which grows as threads are added,
+    // so adding cores actively made the frame slower. Here the two cells times threads
+    // passes are parallel and the serial scan touches each cell once, independent of thread
+    // count.
+    m_cellTotals.resize(cells);
+
+    #pragma omp parallel for if(g_parallel) num_threads(threads) schedule(static)
+    for (int cell = 0; cell < cells; ++cell) {
+        int total = 0;
+        for (int t = 0; t < threads; ++t) total += m_histogram[static_cast<size_t>(t) * cells + cell];
+        m_cellTotals[cell] = total;
+    }
+
     int running = 0;
     for (int cell = 0; cell < cells; ++cell) {
         m_cellStart[cell] = running;
+        running += m_cellTotals[cell];
+    }
+    m_cellStart[cells] = running;
+
+    // Hand each thread its own offset inside the cell it will scatter into. Parallel because
+    // a cell's offsets depend only on that cell's own counts.
+    #pragma omp parallel for if(g_parallel) num_threads(threads) schedule(static)
+    for (int cell = 0; cell < cells; ++cell) {
+        int base = m_cellStart[cell];
         for (int t = 0; t < threads; ++t) {
             int& slot = m_histogram[static_cast<size_t>(t) * cells + cell];
             const int here = slot;
-            slot = running;
-            running += here;
+            slot = base;
+            base += here;
         }
     }
-    m_cellStart[cells] = running;
 
     // Pass 3: scatter. Each thread walks its own ascending range and appends into the slot
     // reserved for it, so a cell's particles come out in ascending index order.

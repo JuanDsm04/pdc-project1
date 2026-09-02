@@ -380,6 +380,12 @@ void App::drawStones() {
         const int cx = static_cast<int>(p.x);
         const int cy = static_cast<int>(p.y);
 
+        // Parallel over rows of one stone's footprint. Stones are still drawn one after
+        // another, and within a single stone every (dx, dy) maps to a distinct pixel, so no
+        // two threads can ever touch the same accumulator slot. Each pixel here costs an
+        // atan2, a polygon walk and an eight seed Voronoi lookup, which is why this loop
+        // was the largest single stage in the frame while it ran on one thread.
+        #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
         for (int dy = -span; dy <= span; ++dy) {
             for (int dx = -span; dx <= span; ++dx) {
                 const float fx = static_cast<float>(dx);
@@ -440,6 +446,7 @@ void App::drawPortal() {
     const int cx = static_cast<int>(p.x);
     const int cy = static_cast<int>(p.y);
 
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
     for (int dy = -span; dy <= span; ++dy) {
         for (int dx = -span; dx <= span; ++dx) {
             const float fx = static_cast<float>(dx);
@@ -544,7 +551,7 @@ void App::render(bool present) {
     m_timer.end(Stage::Bin);
 
     m_timer.begin(Stage::Raster);
-    m_rasterizer.rasterizeTiles(m_framebuffer);
+    m_rasterizer.rasterizeTiles(m_splats, m_framebuffer);
     m_timer.end(Stage::Raster);
 
     m_timer.begin(Stage::Glows);

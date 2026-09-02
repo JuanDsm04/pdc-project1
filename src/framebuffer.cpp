@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "parallel.hpp"
+
 namespace {
 
 constexpr int kGammaLutSize = 4096;
@@ -58,8 +60,14 @@ void Framebuffer::deposit(int x, int y, float r, float g, float b) {
     m_accum[i + 2] += b;
 }
 
+// Every pixel reads and writes only its own three accumulator slots and its own output
+// word, so this needs nothing but the pragma. It went unparallelised far longer than it
+// should have and was costing 6.7 ms of every frame on its own, which no amount of thread
+// count could touch.
 void Framebuffer::tonemap(float exposure) {
     const int count = m_width * m_height;
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
     for (int i = 0; i < count; ++i) {
         const float r = acesFilmic(m_accum[i * 3 + 0] * exposure);
         const float g = acesFilmic(m_accum[i * 3 + 1] * exposure);
