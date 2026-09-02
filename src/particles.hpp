@@ -34,6 +34,21 @@ public:
     // chambers.
     void regroup();
 
+    // Starts the Snap if one is not already running. A deterministic hash selects roughly
+    // half the cloud, then one 12-key counting partition compacts survivors before
+    // dissolving particles inside each of the six chamber blocks. The partition primitive
+    // supplies the per-thread counts, exclusive prefix sum and parallel scatter.
+    bool beginSnap(uint32_t eventSeed);
+
+    // Advances the 1.5 second dissolve and respawns the selected stream when it ends.
+    // merged selects a central spawn volume while the chamber walls are down.
+    void updateSnap(float dt, bool merged);
+
+    bool snapActive() const { return m_snapActive; }
+    float snapProgress() const;
+    float snapVisibility(int particle) const;
+    int snapSelectedCount() const { return m_snapSelectedCount; }
+
     int count() const { return m_count; }
 
     int chamberBegin(int chamber) const { return m_chamberStart[chamber]; }
@@ -63,10 +78,22 @@ public:
     std::vector<uint8_t> chamber;
 
 private:
+    void reorder(const std::vector<int>& order);
+    void respawnSnapped(bool merged);
+
     int m_count = 0;
     int m_chamberStart[kChamberCount + 1] = {};
 
     KeyPartition m_partition;
     std::vector<float>   m_scratchFloat;
     std::vector<uint8_t> m_scratchByte;
+
+    // Kept separate from chamber ownership: during a Snap the selected tail of every
+    // chamber continues to move while its renderer visibility falls to zero.
+    std::vector<uint8_t> m_snapSelected;
+    std::vector<uint8_t> m_snapKeys;
+    bool m_snapActive = false;
+    float m_snapElapsed = 0.0f;
+    uint32_t m_snapSeed = 0;
+    int m_snapSelectedCount = 0;
 };
