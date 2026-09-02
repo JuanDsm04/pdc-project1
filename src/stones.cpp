@@ -462,90 +462,62 @@ void Stones::recordHistory(const ParticleSystem& particles) {
     if (m_historyFilled < kHistorySlots) ++m_historyFilled;
 }
 
-void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
-                         float dt) {
-    const Vec3 soulPos  = stone(StoneKind::Soul).position;
-    const Vec3 powerPos = stone(StoneKind::Power).position;
-    const Vec3 timePos  = stone(StoneKind::Time).position;
-    const Vec3 spaceEntry = stone(StoneKind::Space).position;
-    const Vec3 realityPos = stone(StoneKind::Reality).position;
-    const Vec3 mindPos    = stone(StoneKind::Mind).position;
+// The force pass is six loops rather than one. Each runs over a single chamber's
+// contiguous range with exactly one stone's kernel inside it, so the six way gate that
+// stood here before is gone entirely: no branch to mispredict, no divergence between
+// neighbouring particles in a thread's chunk, and each loop touching one narrow slice of
+// memory instead of striding across all of it.
+//
+// The gated single loop it replaces is still the honest comparison point, and step 21
+// measures against it. Every loop is spread across all threads, which is what keeps the
+// six wildly different kernel costs from landing on different threads; assigning a whole
+// chamber to one thread is the other partitioning, and the one expected to lose.
 
-    // Reality twists about its own orbit tangent, so the axis sweeps as the stone travels
-    // and the warp never settles into the same orientation twice.
-    const Vec3 realityAxis = normalize(cross(realityPos, Vec3{0.0f, 1.0f, 0.0f}));
+void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid, float dt) {
+    applySoul(particles, dt);
+    applyPower(particles, dt);
+    applySpace(particles, dt);
+    applyTime(particles);
+    applyReality(particles, dt);
+    applyMind(particles, grid, dt);
 
-    const int gridDim = grid.dim();
-    const Vec3 spaceExit  = m_spaceExit;
-
-    Vec3 entryN, entryT, entryB;
-    Vec3 exitN, exitT, exitB;
-    portalFrame(spaceEntry, entryN, entryT, entryB);
-    portalFrame(spaceExit, exitN, exitT, exitB);
-
-    const int count = particles.count();
-    const int frontCount = static_cast<int>(m_shockFronts.size());
-    const ShockFront* fronts = m_shockFronts.data();
-
-    // Reverse playback. Slots are only recorded every kHistoryStride steps, so reading the
-    // nearest one alone would hold a particle still for three steps and then jerk it
-    // backwards on the fourth. Blending the two slots the playhead sits between turns that
-    // into continuous reverse motion.
-    const bool rewinding = m_rewinding && m_historyFilled > 1;
-    const float* newerX = nullptr; const float* newerY = nullptr; const float* newerZ = nullptr;
-    const float* olderX = nullptr; const float* olderY = nullptr; const float* olderZ = nullptr;
-    float rewindBlend = 0.0f;
-    if (rewinding) {
-        const int newest = (m_historyCursor - 1 + kHistorySlots) % kHistorySlots;
-        const float reach = m_rewindProgress * (m_historyFilled - 1);
-        const int stepBack = static_cast<int>(reach);
-        const int stepBackNext = std::min(stepBack + 1, m_historyFilled - 1);
-        rewindBlend = reach - static_cast<float>(stepBack);
-
-        const size_t a = static_cast<size_t>((newest - stepBack + kHistorySlots * 2) %
-                                             kHistorySlots) * count;
-        const size_t b = static_cast<size_t>((newest - stepBackNext + kHistorySlots * 2) %
-                                             kHistorySlots) * count;
-        newerX = m_historyX.data() + a; newerY = m_historyY.data() + a; newerZ = m_historyZ.data() + a;
-        olderX = m_historyX.data() + b; olderY = m_historyY.data() + b; olderZ = m_historyZ.data() + b;
+    if (++m_historyStep >= kHistoryStride) {
+        m_historyStep = 0;
+        if (!m_rewinding) recordHistory(particles);
     }
+}
+
+namespace {
+
+// Every kernel opens and closes the same way, so the boilerplate lives here rather than
+// being retyped six times with six chances to load one array and store another.
+struct ChamberRange {
+    int begin;
+    int end;
+};
+
+inline ChamberRange rangeOf(const ParticleSystem& particles, StoneKind kind) {
+    const int c = static_cast<int>(kind);
+    return {particles.chamberBegin(c), particles.chamberEnd(c)};
+}
+
+}  // namespace
+
+void Stones::applySoul(ParticleSystem& particles, float dt) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Soul);
+    const Vec3 soulPos = stone(StoneKind::Soul).position;
+    const float localDt = dt;
 
     int capturedCount = 0;
-    int teleportCount = 0;
 
     #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static) \
-        reduction(+:capturedCount) reduction(+:teleportCount)
-    for (int i = 0; i < count; ++i) {
+        reduction(+:capturedCount)
+    for (int i = range.begin; i < range.end; ++i) {
         Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
         Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
 
-        // A particle is only ever touched by the stone whose chamber it belongs to. This is
-        // the whole point of the chambers: with every stone acting on every particle, six
-        // forces superposed into drift and none of them was identifiable.
-        //
-        // Written as one loop with six gates for now, which is the readable form and gives
-        // step 15 a measurable baseline. Step 15 sorts the particles and splits this into
-        // six loops over contiguous ranges, where the gate disappears entirely.
-        const int owner = particles.chamber[i];
-
-        // Time: everything below integrates against this particle's own dilated step, not
-        // the global one, so a slowed particle is slowed for every stone at once rather
-        // than only for its own motion.
-        float scale = 1.0f;
-        if (owner == static_cast<int>(StoneKind::Time)) {
-            const Vec3 toTime = pos - timePos;
-            const float distanceSq = lengthSq(toTime);
-            if (distanceSq < kTimeBubbleRadius * kTimeBubbleRadius) {
-                const float t = std::sqrt(distanceSq) / kTimeBubbleRadius;
-                const float smooth = t * t * (3.0f - 2.0f * t);
-                scale = kTimeMinScale + (1.0f - kTimeMinScale) * smooth;
-            }
-        }
-        particles.timeScale[i] = scale;
-        const float localDt = dt * scale;
-
         // Soul
-        if (owner == static_cast<int>(StoneKind::Soul)) {
+        {
             const Vec3 toStone = soulPos - pos;
             const float r = length(toStone);
 
@@ -589,8 +561,28 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
             if (particles.captured[i]) ++capturedCount;
         }
 
+        particles.vx[i] = vel.x;
+        particles.vy[i] = vel.y;
+        particles.vz[i] = vel.z;
+    }
+
+    m_soulCapturedCount = capturedCount;
+}
+
+void Stones::applyPower(ParticleSystem& particles, float dt) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Power);
+    const Vec3 powerPos = stone(StoneKind::Power).position;
+    const int frontCount = static_cast<int>(m_shockFronts.size());
+    const ShockFront* fronts = m_shockFronts.data();
+    const float localDt = dt;
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = range.begin; i < range.end; ++i) {
+        Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+        Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
+
         // Power
-        if (owner == static_cast<int>(StoneKind::Power) && frontCount > 0) {
+        if (frontCount > 0) {
             const Vec3 toStone = pos - powerPos;
             const float r = length(toStone);
             if (r > 1e-5f) {
@@ -605,10 +597,170 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
             }
         }
 
-        // Reality: rotate the offset from the stone about its axis, by an angle that dies
-        // off with distance. Nothing is added to velocity, the particle is moved, which is
-        // what makes this a warp of space rather than a force acting through it.
-        if (owner == static_cast<int>(StoneKind::Reality)) {
+        particles.vx[i] = vel.x;
+        particles.vy[i] = vel.y;
+        particles.vz[i] = vel.z;
+    }
+}
+
+void Stones::applySpace(ParticleSystem& particles, float dt) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Space);
+    const Vec3 spaceEntry = stone(StoneKind::Space).position;
+    const Vec3 spaceExit = m_spaceExit;
+    const float localDt = dt;
+
+    Vec3 entryN, entryT, entryB;
+    Vec3 exitN, exitT, exitB;
+    portalFrame(spaceEntry - chamberCenter(static_cast<int>(StoneKind::Space)), entryN, entryT, entryB);
+    portalFrame(spaceExit - chamberCenter(static_cast<int>(StoneKind::Space)), exitN, exitT, exitB);
+
+    int teleportCount = 0;
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static) \
+        reduction(+:teleportCount)
+    for (int i = range.begin; i < range.end; ++i) {
+        Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+        Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
+
+        // Space: the funnel. Everything within the inflow radius is drawn toward the entry
+        // and given a sideways kick around the portal axis, so the cloud visibly spirals
+        // into the mouth. Velocity is carried through the portal unchanged, so the same
+        // motion becomes a spray on the far side and the two events read as one.
+        {
+            const Vec3 toEntry = spaceEntry - pos;
+            const float distanceSq = lengthSq(toEntry);
+            if (distanceSq < kSpaceInflowRadius * kSpaceInflowRadius && distanceSq > 1e-8f) {
+                const float distance = std::sqrt(distanceSq);
+                const Vec3 inward = toEntry * (1.0f / distance);
+
+                const float closeness = 1.0f - distance / kSpaceInflowRadius;
+                const float ramp = closeness * closeness;
+
+                vel += inward * (kSpaceInflowPull * ramp * localDt);
+                vel += cross(entryN, inward) * (kSpaceInflowSwirl * ramp * localDt);
+            }
+        }
+
+        // Space: crossing the entry mouth moves the particle to the exit and re-expresses
+        // both offset and velocity in the exit's frame, so it leaves the far mouth pointing
+        // the way it went in relative to the portal rather than snapping to a fixed heading.
+        {
+            const Vec3 relative = pos - spaceEntry;
+            if (lengthSq(relative) < kSpacePortalRadius * kSpacePortalRadius) {
+                const float a = dot(relative, entryN);
+                const float b = dot(relative, entryT);
+                const float c = dot(relative, entryB);
+                pos = spaceExit + exitN * a + exitT * b + exitB * c;
+
+                const float va = dot(vel, entryN);
+                const float vb = dot(vel, entryT);
+                const float vc = dot(vel, entryB);
+                vel = exitN * va + exitT * vb + exitB * vc;
+
+                ++teleportCount;
+            }
+        }
+
+        particles.px[i] = pos.x;
+        particles.py[i] = pos.y;
+        particles.pz[i] = pos.z;
+        particles.vx[i] = vel.x;
+        particles.vy[i] = vel.y;
+        particles.vz[i] = vel.z;
+    }
+
+    m_spaceTeleportCount = teleportCount;
+
+    const int size = range.end - range.begin;
+    const float share = size > 0 ? static_cast<float>(teleportCount) / size : 0.0f;
+    const float scaled = share * kSpaceActivityScale;
+    m_spaceActivityTarget = scaled > 1.0f ? 1.0f : scaled;
+}
+
+// Time applies no force of its own: it sets the step every other kernel would integrate
+// against, and drives the rewind. There is nothing to scale by dt here, which is why it is
+// the one kernel that does not take it.
+void Stones::applyTime(ParticleSystem& particles) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Time);
+    const Vec3 timePos = stone(StoneKind::Time).position;
+    const int count = particles.count();
+
+    const bool rewinding = m_rewinding && m_historyFilled > 1;
+    const float* newerX = nullptr; const float* newerY = nullptr; const float* newerZ = nullptr;
+    const float* olderX = nullptr; const float* olderY = nullptr; const float* olderZ = nullptr;
+    float rewindBlend = 0.0f;
+    if (rewinding) {
+        const int newest = (m_historyCursor - 1 + kHistorySlots) % kHistorySlots;
+        const float reach = m_rewindProgress * (m_historyFilled - 1);
+        const int stepBack = static_cast<int>(reach);
+        const int stepBackNext = std::min(stepBack + 1, m_historyFilled - 1);
+        rewindBlend = reach - static_cast<float>(stepBack);
+
+        const size_t a = static_cast<size_t>((newest - stepBack + kHistorySlots * 2) %
+                                             kHistorySlots) * count;
+        const size_t b = static_cast<size_t>((newest - stepBackNext + kHistorySlots * 2) %
+                                             kHistorySlots) * count;
+        newerX = m_historyX.data() + a; newerY = m_historyY.data() + a; newerZ = m_historyZ.data() + a;
+        olderX = m_historyX.data() + b; olderY = m_historyY.data() + b; olderZ = m_historyZ.data() + b;
+    }
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = range.begin; i < range.end; ++i) {
+        Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+
+        // Time: everything below integrates against this particle's own dilated step, not
+        // the global one, so a slowed particle is slowed for every stone at once rather
+        // than only for its own motion.
+        float scale = 1.0f;
+        {
+            const Vec3 toTime = pos - timePos;
+            const float distanceSq = lengthSq(toTime);
+            if (distanceSq < kTimeBubbleRadius * kTimeBubbleRadius) {
+                const float t = std::sqrt(distanceSq) / kTimeBubbleRadius;
+                const float smooth = t * t * (3.0f - 2.0f * t);
+                scale = kTimeMinScale + (1.0f - kTimeMinScale) * smooth;
+            }
+        }
+
+        particles.timeScale[i] = scale;
+
+        if (rewinding) {
+            const Vec3 toTime = pos - timePos;
+            if (lengthSq(toTime) < kTimeBubbleRadius * kTimeBubbleRadius) {
+                const Vec3 newer = {newerX[i], newerY[i], newerZ[i]};
+                const Vec3 older = {olderX[i], olderY[i], olderZ[i]};
+                pos = newer + (older - newer) * rewindBlend;
+
+                // The particle is being driven from the record, so its own velocity must
+                // not advance it as well; without this it drifts forward between slots and
+                // the reversal cancels itself out.
+                particles.timeScale[i] = 0.0f;
+            }
+        }
+
+        particles.px[i] = pos.x;
+        particles.py[i] = pos.y;
+        particles.pz[i] = pos.z;
+    }
+}
+
+void Stones::applyReality(ParticleSystem& particles, float dt) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Reality);
+    const Vec3 realityPos = stone(StoneKind::Reality).position;
+
+    // Twists about its own orbit tangent, so the axis sweeps as the stone travels and the
+    // warp never settles into the same orientation twice.
+    const Vec3 realityAxis =
+        normalize(cross(realityPos - chamberCenter(static_cast<int>(StoneKind::Reality)),
+                        Vec3{0.0f, 1.0f, 0.0f}));
+    const float localDt = dt;
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = range.begin; i < range.end; ++i) {
+        Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+        Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
+
+        {
             const Vec3 offset = pos - realityPos;
             const float distanceSq = lengthSq(offset);
             if (distanceSq < kRealityRadius * kRealityRadius) {
@@ -626,10 +778,27 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
             }
         }
 
-        // Mind: take the flock over. Cohesion and alignment are weighed against the mean of
-        // the surrounding cells, separation against this particle's own cell, so the whole
-        // rule set costs 27 cell reads instead of a pass over every neighbour.
-        if (owner == static_cast<int>(StoneKind::Mind)) {
+        particles.px[i] = pos.x;
+        particles.py[i] = pos.y;
+        particles.pz[i] = pos.z;
+        particles.vx[i] = vel.x;
+        particles.vy[i] = vel.y;
+        particles.vz[i] = vel.z;
+    }
+}
+
+void Stones::applyMind(ParticleSystem& particles, const SpatialGrid& grid, float dt) {
+    const ChamberRange range = rangeOf(particles, StoneKind::Mind);
+    const Vec3 mindPos = stone(StoneKind::Mind).position;
+    const int gridDim = grid.dim();
+    const float localDt = dt;
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = range.begin; i < range.end; ++i) {
+        Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+        Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
+
+        {
             const Vec3 toMind = pos - mindPos;
             if (lengthSq(toMind) < kMindRadius * kMindRadius) {
                 const int cx = grid.axisCell(pos.x);
@@ -691,77 +860,8 @@ void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid,
             }
         }
 
-        // Space: the funnel. Everything within the inflow radius is drawn toward the entry
-        // and given a sideways kick around the portal axis, so the cloud visibly spirals
-        // into the mouth. Velocity is carried through the portal unchanged, so the same
-        // motion becomes a spray on the far side and the two events read as one.
-        if (owner == static_cast<int>(StoneKind::Space)) {
-            const Vec3 toEntry = spaceEntry - pos;
-            const float distanceSq = lengthSq(toEntry);
-            if (distanceSq < kSpaceInflowRadius * kSpaceInflowRadius && distanceSq > 1e-8f) {
-                const float distance = std::sqrt(distanceSq);
-                const Vec3 inward = toEntry * (1.0f / distance);
-
-                const float closeness = 1.0f - distance / kSpaceInflowRadius;
-                const float ramp = closeness * closeness;
-
-                vel += inward * (kSpaceInflowPull * ramp * localDt);
-                vel += cross(entryN, inward) * (kSpaceInflowSwirl * ramp * localDt);
-            }
-        }
-
-        // Space: crossing the entry mouth moves the particle to the exit and re-expresses
-        // both offset and velocity in the exit's frame, so it leaves the far mouth pointing
-        // the way it went in relative to the portal rather than snapping to a fixed heading.
-        if (owner == static_cast<int>(StoneKind::Space)) {
-            const Vec3 relative = pos - spaceEntry;
-            if (lengthSq(relative) < kSpacePortalRadius * kSpacePortalRadius) {
-                const float a = dot(relative, entryN);
-                const float b = dot(relative, entryT);
-                const float c = dot(relative, entryB);
-                pos = spaceExit + exitN * a + exitT * b + exitB * c;
-
-                const float va = dot(vel, entryN);
-                const float vb = dot(vel, entryT);
-                const float vc = dot(vel, entryB);
-                vel = exitN * va + exitT * vb + exitB * vc;
-
-                ++teleportCount;
-            }
-        }
-
-        if (rewinding && owner == static_cast<int>(StoneKind::Time)) {
-            const Vec3 toTime = pos - timePos;
-            if (lengthSq(toTime) < kTimeBubbleRadius * kTimeBubbleRadius) {
-                const Vec3 newer = {newerX[i], newerY[i], newerZ[i]};
-                const Vec3 older = {olderX[i], olderY[i], olderZ[i]};
-                pos = newer + (older - newer) * rewindBlend;
-
-                // The particle is being driven from the record, so its own velocity must
-                // not advance it as well; without this it drifts forward between slots and
-                // the reversal cancels itself out.
-                particles.timeScale[i] = 0.0f;
-            }
-        }
-
-        particles.px[i] = pos.x;
-        particles.py[i] = pos.y;
-        particles.pz[i] = pos.z;
-
         particles.vx[i] = vel.x;
         particles.vy[i] = vel.y;
         particles.vz[i] = vel.z;
-    }
-
-    m_soulCapturedCount = capturedCount;
-    m_spaceTeleportCount = teleportCount;
-
-    const float share = count > 0 ? static_cast<float>(teleportCount) / count : 0.0f;
-    const float scaled = share * kSpaceActivityScale;
-    m_spaceActivityTarget = scaled > 1.0f ? 1.0f : scaled;
-
-    if (++m_historyStep >= kHistoryStride) {
-        m_historyStep = 0;
-        if (!m_rewinding) recordHistory(particles);
     }
 }

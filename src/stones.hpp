@@ -81,6 +81,16 @@ public:
     // cell summaries and nothing writes back into it.
     void applyForces(ParticleSystem& particles, const SpatialGrid& grid, float dt);
 
+private:
+    // One kernel per chamber, each over that chamber's contiguous range with no gate.
+    void applySoul(ParticleSystem& particles, float dt);
+    void applyPower(ParticleSystem& particles, float dt);
+    void applySpace(ParticleSystem& particles, float dt);
+    void applyTime(ParticleSystem& particles);
+    void applyReality(ParticleSystem& particles, float dt);
+    void applyMind(ParticleSystem& particles, const SpatialGrid& grid, float dt);
+
+public:
     const Stone& stone(StoneKind kind) const { return m_stones[static_cast<size_t>(kind)]; }
     const std::vector<Stone>& all() const { return m_stones; }
 
