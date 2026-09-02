@@ -37,6 +37,30 @@ constexpr double kCycleDuration =
 // one point or there is nothing for the collisions at step 17 to resolve.
 constexpr float kImpactOrbitRadius = 0.34f;
 
+// Equal-radius, equal-mass collision bodies. They launch inward when Impact begins, then a
+// weak centre pull keeps the six-body cluster active for the full two-second phase.
+constexpr float kStoneCollisionRadius = 0.13f;
+constexpr float kStoneRestitution     = 0.90f;
+constexpr float kImpactLaunchSpeed    = 0.48f;
+constexpr float kImpactTangentSpeed   = 0.15f;
+constexpr float kImpactCenterPull     = 0.72f;
+constexpr float kImpactDrag           = 0.18f;
+constexpr float kImpactBoundsRadius   = 0.52f;
+
+// Collision fronts are stronger and travel across the whole merged cloud. Their shell
+// also tints particles toward the average colour of the two stones that struck each other.
+constexpr float kCollisionShockSpeed      = 1.55f;
+constexpr float kCollisionShockMaxRadius  = kRingExtent;
+constexpr float kCollisionShockShellWidth = 0.065f;
+constexpr float kCollisionShockImpulse    = 1.35f;
+constexpr float kCollisionColorRate       = 7.5f;
+
+constexpr int   kCollisionSparkCount    = 24;
+constexpr float kCollisionSparkMinSpeed = 0.42f;
+constexpr float kCollisionSparkSpeedSpan = 0.58f;
+constexpr float kCollisionSparkLifetime = 0.72f;
+constexpr float kCollisionFlashDecay    = 4.5f;
+
 // Pull toward the centre while gathering, and toward the newly assigned chamber while
 // reforming. Strong enough that a cloud crosses the ring inside the phase it is given.
 constexpr float kConvergePull = 2.60f;
@@ -417,17 +441,46 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
         m_gather = 1.0f - smoothstep01(static_cast<float>(into / kReformDuration));
     }
 
-    // Crossing into Reform is the one moment particles change owner. Doing it on the
-    // boundary rather than continuously means the re-sort happens once per cycle instead of
-    // every frame, and gives the reform phase a fixed target to pull each particle toward.
+    // Impact stops using scripted positions. The six equal-mass bodies launch toward the
+    // centre with alternating tangential components, so their paths cross instead of all
+    // shrinking along six perfectly radial spokes.
+    if (m_phase == Phase::Impact && previous != Phase::Impact) {
+        m_collisionContacts = 0;
+        m_stoneCollisionCount = 0;
+        for (int i = 0; i < kChamberCount; ++i) {
+            Stone& current = m_stones[static_cast<size_t>(i)];
+            if (lengthSq(current.position) < 1e-6f) {
+                current.position = impactPosition(kOrbits[i], time, i);
+            }
+            const Vec3 inward = normalize(-current.position);
+            Vec3 tangent = normalize(cross(Vec3{0.0f, 1.0f, 0.0f}, inward));
+            if ((i & 1) != 0) tangent = -tangent;
+            current.velocity = inward * kImpactLaunchSpeed +
+                               tangent * kImpactTangentSpeed;
+        }
+    }
+
+    // Crossing into Reform is the one moment particles change owner. Capture the dynamic
+    // collision positions first so the stones ease home without snapping back to a scripted
+    // impact orbit on the first reform frame.
     if (m_phase == Phase::Reform && previous != Phase::Reform) {
+        for (int i = 0; i < kChamberCount; ++i) {
+            m_reformStart[i] = m_stones[static_cast<size_t>(i)].position;
+            m_stones[static_cast<size_t>(i)].velocity = {};
+        }
         reassignChambers(particles);
         ++m_cycleCount;
     }
 
     for (size_t i = 0; i < m_stones.size(); ++i) {
         const Vec3 home = orbitPosition(kOrbits[i], time, static_cast<int>(i));
-        if (m_gather <= 0.0f) {
+        if (m_phase == Phase::Impact) {
+            continue;
+        } else if (m_phase == Phase::Reform) {
+            const float returnProgress = 1.0f - m_gather;
+            m_stones[i].position =
+                m_reformStart[i] + (home - m_reformStart[i]) * returnProgress;
+        } else if (m_gather <= 0.0f) {
             m_stones[i].position = home;
         } else {
             const Vec3 gathered = impactPosition(kOrbits[i], time, static_cast<int>(i));
@@ -435,18 +488,37 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
         }
     }
 
+    if (m_phase == Phase::Impact) simulateImpact(dt);
+
     for (ShockFront& front : m_shockFronts) front.age += dt;
 
     std::vector<ShockFront> alive;
     alive.reserve(m_shockFronts.size());
     for (const ShockFront& front : m_shockFronts) {
-        if (front.age * kShockSpeed <= kShockMaxRadius) alive.push_back(front);
+        if (front.age * front.speed <= front.maxRadius) alive.push_back(front);
     }
     m_shockFronts = std::move(alive);
 
+    for (CollisionSpark& spark : m_collisionSparks) {
+        spark.age += dt;
+        spark.position += spark.velocity * dt;
+        spark.velocity *= std::exp(-1.8f * dt);
+    }
+    m_collisionSparks.erase(
+        std::remove_if(m_collisionSparks.begin(), m_collisionSparks.end(),
+                       [](const CollisionSpark& spark) {
+                           return spark.age >= spark.lifetime;
+                       }),
+        m_collisionSparks.end());
+
+    m_collisionFlash = std::max(0.0f, m_collisionFlash - kCollisionFlashDecay * dt);
+
     if (time - m_lastShockSpawn >= kShockSpawnPeriod) {
         m_lastShockSpawn = time;
-        m_shockFronts.push_back(ShockFront{});
+        const Stone& power = stone(StoneKind::Power);
+        m_shockFronts.push_back({power.position, 0.0f, kShockSpeed, kShockMaxRadius,
+                                 kShockShellWidth, kShockImpulse,
+                                 power.r, power.g, power.b, false});
     }
 
     m_releasing = std::fmod(time, kSoulReleasePeriod) < kSoulReleaseDuration;
@@ -466,39 +538,42 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
     }
 
     Stone& space = m_stones[static_cast<size_t>(StoneKind::Space)];
-    space.position += m_spaceJumpOffset;
-
-    // Both mouths are the same point mirrored through the chamber centre, so an entry
-    // sitting on that centre puts them inside one another and a particle teleports into the
-    // mouth it just left on every step. Push it off the centre first.
-    // The mirror the exit is reflected through follows the stone in from its chamber, so
-    // the wormhole keeps working while the walls are down instead of flinging particles back
-    // to an empty globe.
     const Vec3 chamberHome = chamberCenter(static_cast<int>(StoneKind::Space));
     const Vec3 spaceHome = chamberHome + (Vec3{} - chamberHome) * m_gather;
-    const Vec3 fromHome = space.position - spaceHome;
-    const float homeDistance = length(fromHome);
-    if (homeDistance < kSpaceMinOriginDistance) {
-        const Vec3 direction =
-            homeDistance > 1e-4f ? fromHome * (1.0f / homeDistance) : Vec3{1.0f, 0.0f, 0.0f};
-        space.position = spaceHome + direction * kSpaceMinOriginDistance;
+
+    if (m_phase != Phase::Impact) {
+        space.position += m_spaceJumpOffset;
+
+        // Both mouths are mirrored through the chamber centre. Push the entry away from
+        // that centre so it can never overlap its own exit.
+        const Vec3 fromHome = space.position - spaceHome;
+        const float homeDistance = length(fromHome);
+        if (homeDistance < kSpaceMinOriginDistance) {
+            const Vec3 direction = homeDistance > 1e-4f
+                ? fromHome * (1.0f / homeDistance) : Vec3{1.0f, 0.0f, 0.0f};
+            space.position = spaceHome + direction * kSpaceMinOriginDistance;
+        }
+
+        const float reach = (m_gather > 0.0f
+            ? kImpactOrbitRadius + kChamberRadius * 0.4f : kChamberRadius) -
+            kSpacePortalRadius;
+        const Vec3 offset = space.position - spaceHome;
+        const float offsetLength = length(offset);
+        if (offsetLength > reach) {
+            space.position = spaceHome + offset * (reach / offsetLength);
+        }
+        m_spaceExit = spaceHome + (spaceHome - space.position);
+    } else {
+        // Collision dynamics owns the entry position during Impact. Only the exit is moved;
+        // forcing Space itself away from the centre here would invalidate the collision.
+        const Vec3 fromHome = space.position - spaceHome;
+        float exitDistance = length(fromHome);
+        Vec3 direction = exitDistance > 1e-4f
+            ? fromHome * (1.0f / exitDistance) : normalize(space.velocity);
+        if (lengthSq(direction) < 1e-5f) direction = {1.0f, 0.0f, 0.0f};
+        exitDistance = std::max(exitDistance, kSpaceMinOriginDistance);
+        m_spaceExit = spaceHome - direction * exitDistance;
     }
-
-    // The orbit and the jump offset together reach past the wall the particles bounce off,
-    // so both mouths have to be pulled back inside it. An exit sitting outside the box
-    // would emit particles into a region the integrator immediately clamps, pinning them
-    // flat against the wall instead of letting them stream out of the ring. A whole mouth
-    // radius of margin keeps the opening itself clear of the wall, not just its center.
-    const float reach = (m_gather > 0.0f ? kImpactOrbitRadius + kChamberRadius * 0.4f
-                                         : kChamberRadius) - kSpacePortalRadius;
-    const Vec3 offset = space.position - spaceHome;
-    const float offsetLength = length(offset);
-    if (offsetLength > reach) space.position = spaceHome + offset * (reach / offsetLength);
-
-    // The exit sits opposite the entry through the chamber centre, as far from it as the
-    // globe allows. Mirroring a position that is already inside the chamber keeps the exit
-    // inside it too, so nothing can be emitted through a wall.
-    m_spaceExit = spaceHome + (spaceHome - space.position);
 
     m_spaceActivity += (m_spaceActivityTarget - m_spaceActivity) * kSpaceActivityEase;
 
@@ -506,6 +581,124 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
     m_rewinding = rewindPhase < kTimeRewindDuration;
     m_rewindProgress =
         m_rewinding ? static_cast<float>(rewindPhase / kTimeRewindDuration) : 0.0f;
+}
+
+// Integrates six equal-mass spheres and resolves all fifteen possible pairs. This stays
+// serial by design: the work is tiny, and resolving one overlap changes positions needed
+// by later pairs in the same frame.
+void Stones::simulateImpact(float dt) {
+    const float drag = std::exp(-kImpactDrag * dt);
+    const float centerLimit = kImpactBoundsRadius - kStoneCollisionRadius;
+
+    for (Stone& current : m_stones) {
+        current.velocity += (-current.position) * (kImpactCenterPull * dt);
+        current.velocity *= drag;
+        current.position += current.velocity * dt;
+
+        const float distance = length(current.position);
+        if (distance > centerLimit) {
+            const Vec3 normal = current.position * (1.0f / distance);
+            current.position = normal * centerLimit;
+            const float outward = dot(current.velocity, normal);
+            if (outward > 0.0f) {
+                current.velocity -= normal * ((1.0f + kStoneRestitution) * outward);
+            }
+        }
+    }
+
+    uint16_t contactsNow = 0;
+    int pairIndex = 0;
+    const float diameter = kStoneCollisionRadius * 2.0f;
+    const float diameterSq = diameter * diameter;
+
+    for (int first = 0; first < kChamberCount; ++first) {
+        for (int second = first + 1; second < kChamberCount; ++second, ++pairIndex) {
+            Stone& a = m_stones[static_cast<size_t>(first)];
+            Stone& b = m_stones[static_cast<size_t>(second)];
+            Vec3 delta = b.position - a.position;
+            const float distanceSq = lengthSq(delta);
+            if (distanceSq >= diameterSq) continue;
+
+            const uint16_t pairBit = static_cast<uint16_t>(1u << pairIndex);
+            contactsNow = static_cast<uint16_t>(contactsNow | pairBit);
+
+            float distance = std::sqrt(distanceSq);
+            Vec3 normal;
+            if (distance > 1e-5f) {
+                normal = delta * (1.0f / distance);
+            } else {
+                const float angle = static_cast<float>(pairIndex) * 2.39996323f;
+                normal = normalize(Vec3{std::cos(angle), 0.35f, std::sin(angle)});
+                distance = 0.0f;
+            }
+
+            // Split positional correction equally because all six stones have equal mass.
+            const float correction = (diameter - distance) * 0.5f;
+            a.position -= normal * correction;
+            b.position += normal * correction;
+
+            const float closingSpeed = dot(b.velocity - a.velocity, normal);
+            if (closingSpeed < 0.0f) {
+                const float impulse = -(1.0f + kStoneRestitution) * closingSpeed * 0.5f;
+                a.velocity -= normal * impulse;
+                b.velocity += normal * impulse;
+            }
+
+            if ((m_collisionContacts & pairBit) == 0) {
+                const Vec3 contact = (a.position + b.position) * 0.5f;
+                emitCollisionEffects(first, second, contact, normal);
+            }
+        }
+    }
+
+    m_collisionContacts = contactsNow;
+}
+
+void Stones::emitCollisionEffects(int first, int second, Vec3 point, Vec3 normal) {
+    const Stone& a = m_stones[static_cast<size_t>(first)];
+    const Stone& b = m_stones[static_cast<size_t>(second)];
+    const Vec3 blend = {(a.r + b.r) * 0.5f,
+                        (a.g + b.g) * 0.5f,
+                        (a.b + b.b) * 0.5f};
+
+    m_shockFronts.push_back({point, 0.0f, kCollisionShockSpeed,
+                             kCollisionShockMaxRadius, kCollisionShockShellWidth,
+                             kCollisionShockImpulse,
+                             blend.x, blend.y, blend.z, true});
+
+    ++m_collisionEventCounter;
+    ++m_stoneCollisionCount;
+    m_collisionSparks.reserve(m_collisionSparks.size() + kCollisionSparkCount);
+
+    for (int sparkIndex = 0; sparkIndex < kCollisionSparkCount; ++sparkIndex) {
+        uint32_t h = hashCombine(m_collisionEventCounter,
+                                 static_cast<uint32_t>(sparkIndex));
+        const float cosTheta = randomSigned(h); h = hashU32(h);
+        const float phi = randomFloat(h) * 2.0f * kPi; h = hashU32(h);
+        const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+        Vec3 direction = {sinTheta * std::cos(phi), cosTheta,
+                          sinTheta * std::sin(phi)};
+
+        // Alternate the normal bias so the burst sprays out of both sides of the contact.
+        const float side = (sparkIndex & 1) != 0 ? 0.55f : -0.55f;
+        direction = normalize(direction + normal * side);
+        const float speed = kCollisionSparkMinSpeed +
+                            kCollisionSparkSpeedSpan * randomFloat(h);
+        h = hashU32(h);
+        const float lifetime = kCollisionSparkLifetime *
+                               (0.78f + 0.22f * randomFloat(h));
+
+        m_collisionSparks.push_back({point + direction * (kStoneCollisionRadius * 0.18f),
+                                     direction * speed, 0.0f, lifetime,
+                                     blend.x, blend.y, blend.z});
+    }
+
+    if (m_collisionFlash > 0.0f) {
+        m_collisionFlashColor = (m_collisionFlashColor + blend) * 0.5f;
+    } else {
+        m_collisionFlashColor = blend;
+    }
+    m_collisionFlash = 1.0f;
 }
 
 // Snapshots every position into the ring's next slot. Parallel because each particle only
@@ -730,7 +923,6 @@ void Stones::applySoul(ParticleSystem& particles, float dt) {
 
 void Stones::applyPower(ParticleSystem& particles, float dt) {
     const ChamberRange range = rangeOf(particles, StoneKind::Power, m_phase == Phase::Contained);
-    const Vec3 powerPos = stone(StoneKind::Power).position;
     const int frontCount = static_cast<int>(m_shockFronts.size());
     const ShockFront* fronts = m_shockFronts.data();
     const float localDt = dt;
@@ -740,18 +932,29 @@ void Stones::applyPower(ParticleSystem& particles, float dt) {
         Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
         Vec3 vel = {particles.vx[i], particles.vy[i], particles.vz[i]};
 
-        // Power
+        // Power's periodic fronts and collision fronts share the same Gaussian-shell
+        // kernel. Collision fronts additionally tint the particles they strike toward the
+        // average colour of the two stones that produced them.
         if (frontCount > 0) {
-            const Vec3 toStone = pos - powerPos;
-            const float r = length(toStone);
-            if (r > 1e-5f) {
-                const Vec3 dir = toStone * (1.0f / r);
-                for (int f = 0; f < frontCount; ++f) {
-                    const float frontRadius = fronts[f].age * kShockSpeed;
-                    const float delta = r - frontRadius;
-                    const float shell =
-                        std::exp(-(delta * delta) / (2.0f * kShockShellWidth * kShockShellWidth));
-                    vel += dir * (kShockImpulse * shell * localDt);
+            for (int f = 0; f < frontCount; ++f) {
+                const ShockFront& front = fronts[f];
+                const Vec3 fromFront = pos - front.center;
+                const float r = length(fromFront);
+                if (r <= 1e-5f) continue;
+
+                const float frontRadius = front.age * front.speed;
+                const float delta = r - frontRadius;
+                const float shell = std::exp(
+                    -(delta * delta) / (2.0f * front.shellWidth * front.shellWidth));
+                const Vec3 direction = fromFront * (1.0f / r);
+                vel += direction * (front.impulse * shell * localDt);
+
+                if (front.fromCollision) {
+                    const float blend = std::min(1.0f,
+                        kCollisionColorRate * shell * localDt);
+                    particles.cr[i] += (front.r - particles.cr[i]) * blend;
+                    particles.cg[i] += (front.g - particles.cg[i]) * blend;
+                    particles.cb[i] += (front.b - particles.cb[i]) * blend;
                 }
             }
         }

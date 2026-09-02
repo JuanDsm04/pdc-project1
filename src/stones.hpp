@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "math3d.hpp"
@@ -14,7 +15,7 @@ enum class StoneKind { Space, Mind, Reality, Power, Time, Soul, Count };
 // decorative circle that drifts out of step with the physics.
 constexpr float kSpacePortalRadius = kChamberRadius * 0.21f;
 
-// The two finished stones use hand-authored, convex-ish outlines rather than a noisy
+// The finished stones use hand-authored, convex-ish outlines rather than a noisy
 // circle. Keeping the points in normalized screen space makes the silhouette cheap to
 // rasterize while still allowing every stone to have a completely different aspect ratio.
 constexpr int kMaxStoneOutlinePoints = 16;
@@ -27,7 +28,7 @@ struct StoneOutlinePoint {
 
 // A small Voronoi field inside the silhouette gives the stone broad crystal planes. The
 // value is the amount of light caught by that plane; it is intentionally authored with the
-// outline so the internal structure is different for Soul and Power as well.
+// outline so the internal structure is different for every stone as well.
 struct StoneFacetSeed {
     float x = 0.0f;
     float y = 0.0f;
@@ -41,6 +42,7 @@ struct Stone {
     StoneKind kind;
     float r, g, b;
     Vec3  position;
+    Vec3  velocity;
 
     int outlineCount = 0;
     StoneOutlinePoint outline[kMaxStoneOutlinePoints] = {};
@@ -62,11 +64,29 @@ float stoneSurfaceLighting(const Stone& stone, float x, float y);
 // converges on the centre before reforming.
 enum class Phase { Contained, Converge, Impact, Reform };
 
-// One expanding shockwave front spawned by the Power stone. Radius is derived from age
-// rather than stored, so aging every front is a single add with nothing else to keep in
-// sync.
+// Shared representation for Power's regular fronts and the stronger fronts emitted by
+// stone collisions. Collision fronts carry their blended colour into both the particle
+// tint and the visible ring.
 struct ShockFront {
+    Vec3 center;
     float age = 0.0f;
+    float speed = 0.0f;
+    float maxRadius = 0.0f;
+    float shellWidth = 0.0f;
+    float impulse = 0.0f;
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    bool fromCollision = false;
+};
+
+// Small, short-lived visual particles emitted at the contact point. They are deliberately
+// separate from the configurable simulation cloud: a collision effect must not silently
+// change the --particles workload that later benchmark steps measure.
+struct CollisionSpark {
+    Vec3 position;
+    Vec3 velocity;
+    float age = 0.0f;
+    float lifetime = 0.0f;
+    float r = 0.0f, g = 0.0f, b = 0.0f;
 };
 
 // Owns the six stones' positions and the forces the stones that already have physics
@@ -139,15 +159,25 @@ public:
     // event on screen instead of two unrelated lights.
     float spaceActivity() const { return m_spaceActivity; }
 
+    // Read-only effect state consumed by App's CPU renderer.
+    const std::vector<ShockFront>& shockFronts() const { return m_shockFronts; }
+    const std::vector<CollisionSpark>& collisionSparks() const { return m_collisionSparks; }
+    float collisionFlash() const { return m_collisionFlash; }
+    Vec3 collisionFlashColor() const { return m_collisionFlashColor; }
+    int stoneCollisionCount() const { return m_stoneCollisionCount; }
+
 private:
     // Snapshots of every particle position, kept in a ring so the Time stone has a past to
     // rewind into. Stored here rather than in ParticleSystem because Time is the only thing
     // that reads it and integrate never touches it, so it would only pollute that loop's
     // cache footprint. Laid out slot major, index [slot * count + particle].
     void recordHistory(const ParticleSystem& particles);
+    void simulateImpact(float dt);
+    void emitCollisionEffects(int first, int second, Vec3 point, Vec3 normal);
 
     std::vector<Stone> m_stones;
     std::vector<ShockFront> m_shockFronts;
+    std::vector<CollisionSpark> m_collisionSparks;
 
     double m_lastShockSpawn = -1e9;
     int    m_soulCapturedCount = 0;
@@ -164,6 +194,13 @@ private:
     Phase  m_phase = Phase::Contained;
     float  m_gather = 0.0f;
     uint32_t m_cycleCount = 0;
+
+    Vec3 m_reformStart[kChamberCount] = {};
+    uint16_t m_collisionContacts = 0;
+    uint32_t m_collisionEventCounter = 0;
+    int m_stoneCollisionCount = 0;
+    float m_collisionFlash = 0.0f;
+    Vec3 m_collisionFlashColor = {1.0f, 1.0f, 1.0f};
 
     std::vector<float> m_historyX, m_historyY, m_historyZ;
     int  m_historyCount = 0;   // particles the ring is currently sized for

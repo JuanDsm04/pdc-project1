@@ -49,6 +49,10 @@ constexpr float kPortalColor[3] = {0.20f, 0.45f, 1.00f};
 // How much brighter the Time stone burns during a rewind.
 constexpr float kRewindFlare = 2.2f;
 
+constexpr float kCollisionRingBrightness = 3.1f;
+constexpr float kCollisionSparkBrightness = 3.8f;
+constexpr float kCollisionFlashStrength = 0.07f;
+
 // Distance the orbits are tuned around. Attenuation is expressed relative to it so that
 // glows read as receding without the near ones saturating the whole frame.
 constexpr float kReferenceDepth = 5.4f;
@@ -354,6 +358,81 @@ void App::drawPortal() {
     }
 }
 
+// Collision feedback has three layers: a blended expanding ring, a short-lived spark
+// burst at the contact, and a very brief full-screen flash. All are drawn into the same HDR
+// buffer as the particles, so overlapping impacts add naturally before tone mapping.
+void App::drawCollisionEffects() {
+    for (const ShockFront& front : m_stones.shockFronts()) {
+        if (!front.fromCollision) continue;
+
+        const Projected p = m_camera.project(front.center);
+        if (!p.visible) continue;
+
+        const float ringRadius = front.age * front.speed * p.scale;
+        const float thickness = std::max(1.0f, front.shellWidth * p.scale);
+        const int span = static_cast<int>(ringRadius + thickness * 3.0f);
+        const float invTwoSigmaSq = 1.0f / (2.0f * thickness * thickness);
+        const float lifetime = front.maxRadius / front.speed;
+        const float fade = std::max(0.0f, 1.0f - front.age / lifetime);
+        const float attenuation = std::min(2.0f,
+            (kReferenceDepth / p.depth) * (kReferenceDepth / p.depth));
+        const float peak = kCollisionRingBrightness * fade * attenuation;
+        const int cx = static_cast<int>(p.x);
+        const int cy = static_cast<int>(p.y);
+
+        for (int dy = -span; dy <= span; ++dy) {
+            for (int dx = -span; dx <= span; ++dx) {
+                const float fx = static_cast<float>(dx);
+                const float fy = static_cast<float>(dy);
+                const float offset = std::sqrt(fx * fx + fy * fy) - ringRadius;
+                const float intensity = peak *
+                    std::exp(-(offset * offset) * invTwoSigmaSq);
+                m_framebuffer.deposit(cx + dx, cy + dy,
+                                      front.r * intensity,
+                                      front.g * intensity,
+                                      front.b * intensity);
+            }
+        }
+    }
+
+    for (const CollisionSpark& spark : m_stones.collisionSparks()) {
+        const Projected p = m_camera.project(spark.position);
+        if (!p.visible) continue;
+
+        const float radius = std::max(1.0f, std::min(2.5f, 0.011f * p.scale));
+        const int span = static_cast<int>(radius * 2.5f);
+        const float invTwoSigmaSq = 1.0f / (radius * radius);
+        const float fade = std::max(0.0f, 1.0f - spark.age / spark.lifetime);
+        const float peak = kCollisionSparkBrightness * fade * fade;
+        const int cx = static_cast<int>(p.x);
+        const int cy = static_cast<int>(p.y);
+
+        for (int dy = -span; dy <= span; ++dy) {
+            for (int dx = -span; dx <= span; ++dx) {
+                const float distanceSq = static_cast<float>(dx * dx + dy * dy);
+                const float intensity = peak * std::exp(-distanceSq * invTwoSigmaSq);
+                m_framebuffer.deposit(cx + dx, cy + dy,
+                                      spark.r * intensity,
+                                      spark.g * intensity,
+                                      spark.b * intensity);
+            }
+        }
+    }
+
+    const float flash = m_stones.collisionFlash();
+    if (flash <= 0.0f) return;
+
+    const Vec3 color = m_stones.collisionFlashColor();
+    const float intensity = kCollisionFlashStrength * flash * flash;
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            m_framebuffer.deposit(x, y, color.x * intensity,
+                                  color.y * intensity, color.z * intensity);
+        }
+    }
+}
+
 void App::render() {
     m_framebuffer.clear();
 
@@ -376,6 +455,7 @@ void App::render() {
     m_timer.begin(Stage::Glows);
     drawStones();
     drawPortal();
+    drawCollisionEffects();
     m_timer.end(Stage::Glows);
 
     m_timer.begin(Stage::Tonemap);

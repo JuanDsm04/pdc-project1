@@ -27,6 +27,7 @@ private:
     void buildSplats();
     void drawStones();
     void drawPortal();
+    void drawCollisionEffects();
 
     SDL_Window*   m_window   = nullptr;
     SDL_Renderer* m_renderer = nullptr;
