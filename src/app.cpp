@@ -1,8 +1,14 @@
 #include "app.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+
+#include <omp.h>
 
 #include "parallel.hpp"
 
@@ -31,10 +37,6 @@ constexpr float kShapeMaxMultiplier = 1.42f;
 // than blurring the silhouette away.
 constexpr float kGlowHaloStrength = 0.18f;
 constexpr float kGlowHaloSigmaScale = 0.24f;
-
-// Stands in for the --particles flag until the CLI lands at step 15.
-constexpr int      kDefaultParticleCount = 1000;
-constexpr uint32_t kDefaultSeed = 1337u;
 
 constexpr float kParticleBrightness = 0.9f;
 
@@ -73,41 +75,52 @@ constexpr float kSplatSigmaScale = 0.5f;
 
 }  // namespace
 
-bool App::init(int width, int height) {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+bool App::init(const AppConfig& config) {
+    m_config = config;
+    g_parallel = config.startParallel;
+    g_threads = config.threads;
+    omp_set_dynamic(0);
+    omp_set_num_threads(g_threads);
+
+    const Uint32 sdlFlags = config.benchmark ? SDL_INIT_TIMER
+                                             : SDL_INIT_VIDEO | SDL_INIT_TIMER;
+    if (SDL_Init(sdlFlags) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
+    m_sdlInitialized = true;
 
-    m_width  = width  < kMinWidth  ? kMinWidth  : width;
-    m_height = height < kMinHeight ? kMinHeight : height;
+    m_width  = config.width  < kMinWidth  ? kMinWidth  : config.width;
+    m_height = config.height < kMinHeight ? kMinHeight : config.height;
 
-    m_window = SDL_CreateWindow("Infinity Gauntlet", SDL_WINDOWPOS_CENTERED,
-                                SDL_WINDOWPOS_CENTERED, m_width, m_height,
-                                SDL_WINDOW_SHOWN);
-    if (!m_window) {
-        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        return false;
-    }
+    if (!config.benchmark) {
+        m_window = SDL_CreateWindow("Infinity Gauntlet", SDL_WINDOWPOS_CENTERED,
+                                    SDL_WINDOWPOS_CENTERED, m_width, m_height,
+                                    SDL_WINDOW_SHOWN);
+        if (!m_window) {
+            std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+            return false;
+        }
 
-    m_renderer = SDL_CreateRenderer(
-        m_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!m_renderer) {
-        std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        return false;
-    }
+        Uint32 rendererFlags = SDL_RENDERER_ACCELERATED;
+        if (config.vsync) rendererFlags |= SDL_RENDERER_PRESENTVSYNC;
+        m_renderer = SDL_CreateRenderer(m_window, -1, rendererFlags);
+        if (!m_renderer) {
+            std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+            return false;
+        }
 
-    m_texture = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_ARGB8888,
-                                  SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
-    if (!m_texture) {
-        std::fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
-        return false;
+        m_texture = SDL_CreateTexture(m_renderer, SDL_PIXELFORMAT_ARGB8888,
+                                      SDL_TEXTUREACCESS_STREAMING, m_width, m_height);
+        if (!m_texture) {
+            std::fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+            return false;
+        }
     }
 
     m_framebuffer.resize(m_width, m_height);
     m_camera.setViewport(m_width, m_height);
-    m_particles.reset(kDefaultParticleCount, kDefaultSeed);
-    m_projected.resize(kDefaultParticleCount);
+    m_projected.resize(config.particleCount);
     m_rasterizer.resize(m_width, m_height);
 
     // Cells a little wider than a particle is likely to travel in one step, so a flock's
@@ -115,14 +128,34 @@ bool App::init(int width, int height) {
     // The grid now has to span the whole ring, not one box. Most of it is the empty gaps
     // between globes, which costs a walk over empty cells but keeps a single flat index.
     m_grid.configure(kRingExtent, 28);
+    resetSimulation();
 
-    if (!m_hud.init()) return false;
+    if (!config.benchmark) {
+        if (!m_hud.init()) return false;
+    }
 
     m_running = true;
     return true;
 }
 
 void App::run() {
+    if (m_config.benchmark) {
+        runBenchmark();
+    } else {
+        runInteractive();
+    }
+}
+
+void App::resetSimulation() {
+    m_time = 0.0;
+    m_stones = Stones{};
+    m_particles.reset(m_config.particleCount, m_config.seed);
+    m_projected.resize(m_config.particleCount);
+    m_splats.resize(m_config.particleCount);
+    m_camera.update(0.0, 0.0f);
+}
+
+void App::runInteractive() {
     const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
     Uint64 previous = SDL_GetPerformanceCounter();
     double accumulator = 0.0;
@@ -144,10 +177,70 @@ void App::run() {
             accumulator -= kFixedStep;
         }
 
-        render();
+        render(true);
 
         m_timer.endFrame();
-        m_hud.update(m_timer);
+        m_hud.update(m_timer, g_parallel, g_threads, m_particles.count());
+    }
+}
+
+void App::runBenchmark() {
+    constexpr int kWarmupFrames = 30;
+
+    std::vector<int> threadCounts{1};
+    for (int threads = 2; threads < m_config.threads; threads *= 2) {
+        threadCounts.push_back(threads);
+    }
+    if (threadCounts.back() != m_config.threads) threadCounts.push_back(m_config.threads);
+
+    std::vector<std::vector<double>> measurements(threadCounts.size());
+    for (size_t index = 0; index < threadCounts.size(); ++index) {
+        const int threads = threadCounts[index];
+        g_parallel = threads > 1;
+        g_threads = threads;
+        omp_set_num_threads(threads);
+        measurements[index].reserve(m_config.benchmarkRuns);
+
+        std::fprintf(stderr, "Midiendo con %d hilo(s)...\n", threads);
+        for (int run = 0; run < m_config.benchmarkRuns; ++run) {
+            resetSimulation();
+            for (int frame = 0; frame < kWarmupFrames; ++frame) {
+                m_timer.beginFrame();
+                update(kFixedStep);
+                render(false);
+                m_timer.endFrame();
+            }
+
+            const auto begin = std::chrono::steady_clock::now();
+            for (int frame = 0; frame < m_config.benchmarkFrames; ++frame) {
+                m_timer.beginFrame();
+                update(kFixedStep);
+                render(false);
+                m_timer.endFrame();
+            }
+            const auto end = std::chrono::steady_clock::now();
+            measurements[index].push_back(std::chrono::duration<double>(end - begin).count());
+        }
+    }
+
+    std::vector<double> means(measurements.size(), 0.0);
+    for (size_t i = 0; i < measurements.size(); ++i) {
+        means[i] = std::accumulate(measurements[i].begin(), measurements[i].end(), 0.0) /
+                   static_cast<double>(measurements[i].size());
+    }
+
+    std::cout << "threads,measurement,seconds,fps,mean_seconds,speedup,efficiency\n";
+    std::cout << std::fixed << std::setprecision(6);
+    for (size_t i = 0; i < threadCounts.size(); ++i) {
+        const int threads = threadCounts[i];
+        const double speedup = means.front() / means[i];
+        const double efficiency = speedup / static_cast<double>(threads);
+        for (size_t run = 0; run < measurements[i].size(); ++run) {
+            const double seconds = measurements[i][run];
+            const double fps = static_cast<double>(m_config.benchmarkFrames) / seconds;
+            std::cout << threads << ',' << (run + 1) << ',' << seconds << ',' << fps << ','
+                      << means[i] << ',' << speedup << ',' << efficiency << '\n';
+        }
     }
 }
 
@@ -159,7 +252,13 @@ void App::handleEvents() {
                 m_running = false;
                 break;
             case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_ESCAPE) m_running = false;
+                if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    m_running = false;
+                } else if (event.key.keysym.sym == SDLK_SPACE) {
+                    m_stones.triggerSnap(m_particles);
+                } else if (event.key.keysym.sym == SDLK_p) {
+                    g_parallel = !g_parallel;
+                }
                 break;
             default:
                 break;
@@ -171,8 +270,8 @@ void App::update(double dt) {
     m_time += dt;
     m_camera.update(m_time, m_stones.gather());
 
-    // The grid is rebuilt before the forces because Mind reads it and nothing writes it,
-    // which is what lets the whole force pass stay one parallel loop over particles.
+    // The grid is rebuilt before the forces because Mind only reads its summaries. The six
+    // chamber kernels can therefore run without synchronizing with grid construction.
     m_timer.begin(Stage::Grid);
     m_grid.build(m_particles);
     m_timer.end(Stage::Grid);
@@ -232,7 +331,7 @@ void App::buildSplats() {
         s.invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
 
         const float ratio = kReferenceDepth / p.depth;
-        s.peak = kParticleBrightness * ratio * ratio;
+        s.peak = kParticleBrightness * ratio * ratio * m_particles.snapVisibility(i);
 
         s.r = m_particles.cr[i];
         s.g = m_particles.cg[i];
@@ -240,13 +339,9 @@ void App::buildSplats() {
     }
 }
 
-// Draws every stone's own glowing body at its current position. All six still share this
-// one rendering pass regardless of whether they have real physics or a real silhouette
-// yet: a stone's shape function returns a plain circle until it has an authored outline,
-// so unfinished stones (Space, Time, Reality, Mind for now) render exactly as
-// before. Soul's glow brightens with how many particles it currently holds, so the
-// capture and release cycle its physics drives is visible even without a HUD readout of
-// the count.
+// Draws every stone's glowing, faceted body at its current position. All six share this
+// rendering pass while their authored outlines and facet seeds give each one a different
+// silhouette. Soul brightens with the share of particles it currently holds.
 void App::drawStones() {
     for (const Stone& stone : m_stones.all()) {
         const Projected p = m_camera.project(stone.position);
@@ -433,7 +528,7 @@ void App::drawCollisionEffects() {
     }
 }
 
-void App::render() {
+void App::render(bool present) {
     m_framebuffer.clear();
 
     m_timer.begin(Stage::Project);
@@ -462,12 +557,14 @@ void App::render() {
     m_framebuffer.tonemap(kExposure);
     m_timer.end(Stage::Tonemap);
 
-    m_timer.begin(Stage::Present);
-    SDL_UpdateTexture(m_texture, nullptr, m_framebuffer.pixels(), m_framebuffer.pitch());
-    SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);
-    m_hud.render(m_renderer);
-    SDL_RenderPresent(m_renderer);
-    m_timer.end(Stage::Present);
+    if (present) {
+        m_timer.begin(Stage::Present);
+        SDL_UpdateTexture(m_texture, nullptr, m_framebuffer.pixels(), m_framebuffer.pitch());
+        SDL_RenderCopy(m_renderer, m_texture, nullptr, nullptr);
+        m_hud.render(m_renderer);
+        SDL_RenderPresent(m_renderer);
+        m_timer.end(Stage::Present);
+    }
 }
 
 void App::shutdown() {
@@ -478,5 +575,6 @@ void App::shutdown() {
     m_texture = nullptr;
     m_renderer = nullptr;
     m_window = nullptr;
-    SDL_Quit();
+    if (m_sdlInitialized) SDL_Quit();
+    m_sdlInitialized = false;
 }

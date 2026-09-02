@@ -175,8 +175,8 @@ constexpr float  kTimeMinScale     = 0.10f;
 // Position snapshots for the rewind, kept every kHistoryStride physics steps. Sixteen
 // slots at a 120 Hz step is a shade under a second of recallable past. Cost is
 // 12 bytes per particle per slot, which is the memory bandwidth this stone is meant to
-// stress; it also means history is the one part of the project whose footprint scales
-// with --particles, worth watching when that flag lands.
+// stress; it also makes the history allocation an important part of the validated upper
+// limit accepted by --particles.
 constexpr int    kHistorySlots  = 16;
 constexpr int    kHistoryStride = 6;
 
@@ -441,6 +441,8 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
         m_gather = 1.0f - smoothstep01(static_cast<float>(into / kReformDuration));
     }
 
+    particles.updateSnap(dt, m_phase != Phase::Contained);
+
     // Impact stops using scripted positions. The six equal-mass bodies launch toward the
     // centre with alternating tangential components, so their paths cross instead of all
     // shrinking along six perfectly radial spokes.
@@ -458,6 +460,7 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
             current.velocity = inward * kImpactLaunchSpeed +
                                tangent * kImpactTangentSpeed;
         }
+        triggerSnap(particles);
     }
 
     // Crossing into Reform is the one moment particles change owner. Capture the dynamic
@@ -581,6 +584,21 @@ void Stones::update(double time, float dt, ParticleSystem& particles) {
     m_rewinding = rewindPhase < kTimeRewindDuration;
     m_rewindProgress =
         m_rewinding ? static_cast<float>(rewindPhase / kTimeRewindDuration) : 0.0f;
+}
+
+void Stones::triggerSnap(ParticleSystem& particles) {
+    const uint32_t eventSeed = hashU32(0x534e4150u + m_snapEventCounter);
+    if (!particles.beginSnap(eventSeed)) return;
+
+    ++m_snapEventCounter;
+
+    // The compaction changes particle indices. Time's history is indexed by particle, so
+    // keeping old slots would rewind a survivor along some other particle's path.
+    m_historyFilled = 0;
+    m_historyCursor = 0;
+    m_historyStep = 0;
+    m_rewinding = false;
+    m_rewindProgress = 0.0f;
 }
 
 // Integrates six equal-mass spheres and resolves all fifteen possible pairs. This stays
@@ -739,10 +757,8 @@ void Stones::recordHistory(const ParticleSystem& particles) {
 // neighbouring particles in a thread's chunk, and each loop touching one narrow slice of
 // memory instead of striding across all of it.
 //
-// The gated single loop it replaces is still the honest comparison point, and step 21
-// measures against it. Every loop is spread across all threads, which is what keeps the
-// six wildly different kernel costs from landing on different threads; assigning a whole
-// chamber to one thread is the other partitioning, and the one expected to lose.
+// Every loop is spread across all threads, which prevents one worker from owning a whole
+// expensive chamber while another finishes a cheaper power and waits.
 
 void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid, float dt) {
     if (m_phase != Phase::Contained) applyMergeDrift(particles, dt);

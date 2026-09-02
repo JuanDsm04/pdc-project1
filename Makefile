@@ -10,12 +10,13 @@ SRC_DIR := src
 OBJ_DIR := build
 BIN_DIR := bin
 TARGET  := $(BIN_DIR)/gauntlet
+RESULTS_DIR := results
 
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all clean run
+.PHONY: all clean run benchmark
 
 all: $(TARGET)
 
@@ -33,5 +34,10 @@ clean:
 
 run: $(TARGET)
 	./$(TARGET)
+
+benchmark: $(TARGET)
+	mkdir -p $(RESULTS_DIR)
+	./$(TARGET) --benchmark --particles 200000 --bench-frames 300 \
+		--bench-runs 10 > $(RESULTS_DIR)/scaling.csv
 
 -include $(DEPS)

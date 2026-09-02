@@ -89,9 +89,8 @@ struct CollisionSpark {
     float r = 0.0f, g = 0.0f, b = 0.0f;
 };
 
-// Owns the six stones' positions and the forces the stones that already have physics
-// exert on the particle system. Reality and Mind still only move on their scripted orbit
-// for now; their powers arrive at step 12.
+// Owns the six stones' positions and every force they exert on the particle system.
+// App only consumes their read-only visual and effect state.
 class Stones {
 public:
     Stones();
@@ -102,6 +101,11 @@ public:
     // to a new chamber and re-sorts them, which cannot be done from outside without leaking
     // the phase boundary into the caller.
     void update(double time, float dt, ParticleSystem& particles);
+
+    // Manual and automatic entry point for the Snap. Repeated requests while its 1.5
+    // second dissolve is active are ignored by ParticleSystem, preventing overlapping
+    // compactions from invalidating particle-indexed state.
+    void triggerSnap(ParticleSystem& particles);
 
     Phase phase() const { return m_phase; }
 
@@ -194,6 +198,7 @@ private:
     Phase  m_phase = Phase::Contained;
     float  m_gather = 0.0f;
     uint32_t m_cycleCount = 0;
+    uint32_t m_snapEventCounter = 0;
 
     Vec3 m_reformStart[kChamberCount] = {};
     uint16_t m_collisionContacts = 0;

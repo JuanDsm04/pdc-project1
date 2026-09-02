@@ -5,6 +5,7 @@
 #include <SDL2/SDL.h>
 
 #include "camera.hpp"
+#include "config.hpp"
 #include "framebuffer.hpp"
 #include "grid.hpp"
 #include "hud.hpp"
@@ -15,14 +16,17 @@
 
 class App {
 public:
-    bool init(int width, int height);
+    bool init(const AppConfig& config);
     void run();
     void shutdown();
 
 private:
+    void runInteractive();
+    void runBenchmark();
+    void resetSimulation();
     void handleEvents();
     void update(double dt);
-    void render();
+    void render(bool present);
     void projectParticles();
     void buildSplats();
     void drawStones();
@@ -41,6 +45,7 @@ private:
     Hud            m_hud;
     FrameTimer     m_timer;
     Stones         m_stones;
+    AppConfig      m_config;
 
     // Filled by projectParticles, one entry per particle, consumed by buildSplats.
     // Splitting the projection out of the splat loop is what lets the projection run in
@@ -56,5 +61,6 @@ private:
     int    m_width   = 0;
     int    m_height  = 0;
     bool   m_running = false;
+    bool   m_sdlInitialized = false;
     double m_time    = 0.0;
 };
