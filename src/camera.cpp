@@ -10,6 +10,10 @@ constexpr float kNearPlane = 0.05f;
 constexpr float kOrbitRadius = 5.4f;
 constexpr float kOrbitSpeed  = 0.11f;
 
+// Where the camera settles once the stones have gathered, close enough that the collision
+// fills the frame instead of happening in the middle of a mostly empty ring.
+constexpr float kMergeOrbitRadius = 2.6f;
+
 }  // namespace
 
 void Camera::setViewport(int width, int height, float verticalFovDegrees) {
@@ -20,13 +24,15 @@ void Camera::setViewport(int width, int height, float verticalFovDegrees) {
     m_focal = m_halfHeight / std::tan(fovRadians * 0.5f);
 }
 
-void Camera::update(double time) {
+void Camera::update(double time, float gather) {
     const float angle = static_cast<float>(time * kOrbitSpeed);
     // Enough tilt to see the ring as a ring rather than edge on, without ever looking
     // straight down at it.
     const float height = 1.5f + 0.7f * std::sin(static_cast<float>(time * 0.07));
 
-    m_position = {std::cos(angle) * kOrbitRadius, height, std::sin(angle) * kOrbitRadius};
+    const float radius = kOrbitRadius + (kMergeOrbitRadius - kOrbitRadius) * gather;
+    m_position = {std::cos(angle) * radius, height * (1.0f - 0.45f * gather),
+                  std::sin(angle) * radius};
 
     m_forward = normalize(-m_position);
     m_right   = normalize(cross(m_forward, Vec3{0.0f, 1.0f, 0.0f}));

@@ -165,7 +165,7 @@ void App::handleEvents() {
 
 void App::update(double dt) {
     m_time += dt;
-    m_camera.update(m_time);
+    m_camera.update(m_time, m_stones.gather());
 
     // The grid is rebuilt before the forces because Mind reads it and nothing writes it,
     // which is what lets the whole force pass stay one parallel loop over particles.
@@ -174,12 +174,12 @@ void App::update(double dt) {
     m_timer.end(Stage::Grid);
 
     m_timer.begin(Stage::Forces);
-    m_stones.update(m_time, static_cast<float>(dt));
+    m_stones.update(m_time, static_cast<float>(dt), m_particles);
     m_stones.applyForces(m_particles, m_grid, static_cast<float>(dt));
     m_timer.end(Stage::Forces);
 
     m_timer.begin(Stage::Integrate);
-    m_particles.integrate(static_cast<float>(dt));
+    m_particles.integrate(static_cast<float>(dt), m_stones.chamberWallsUp());
     m_timer.end(Stage::Integrate);
 }
 

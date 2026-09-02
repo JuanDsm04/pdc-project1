@@ -20,7 +20,9 @@ constexpr float kWorldHalfExtent = kRingExtent;
 class ParticleSystem {
 public:
     void reset(int count, uint32_t seed);
-    void integrate(float dt);
+    // chamberWalls false drops the globes and confines to the outer bound instead, which is
+    // what lets the cloud cross the ring during a merge.
+    void integrate(float dt, bool chamberWalls);
 
     // Reorders every per particle array so particles are grouped by chamber, and records
     // where each chamber's block starts. Step 15 launches one loop per block, which is what

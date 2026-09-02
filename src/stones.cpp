@@ -24,6 +24,35 @@ const OrbitParams kOrbits[6] = {
     {1.00f, 0.32f, 0.03f, 0.88f, 0.36f, 5.1f, 0.40f},  // soul
 };
 
+// The merge cycle. Ten seconds of contained chambers is enough to read all six powers
+// before the walls drop; the rest is the gather, the collision, and the reform.
+constexpr double kContainedDuration = 10.0;
+constexpr double kConvergeDuration  = 3.0;
+constexpr double kImpactDuration    = 2.0;
+constexpr double kReformDuration    = 3.0;
+constexpr double kCycleDuration =
+    kContainedDuration + kConvergeDuration + kImpactDuration + kReformDuration;
+
+// How far from the world origin the stones mill about during impact. They must not stack on
+// one point or there is nothing for the collisions at step 17 to resolve.
+constexpr float kImpactOrbitRadius = 0.34f;
+
+// Pull toward the centre while gathering, and toward the newly assigned chamber while
+// reforming. Strong enough that a cloud crosses the ring inside the phase it is given.
+constexpr float kConvergePull = 2.60f;
+constexpr float kReformPull   = 3.40f;
+
+// How much of the globe the returning cloud is aimed across.
+constexpr float kReformSpread  = 0.62f;
+
+// Smoothstep, so the walls do not snap open and the stones do not start moving at full
+// speed on the first frame of a phase.
+inline float smoothstep01(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // A stone no longer crosses the whole world. It drifts on a small orbit inside its own
 // chamber, which keeps it moving without letting it wander into anyone else's globe. The
 // authored orbitRadius and bob are reused as shape, scaled down to the chamber.
@@ -36,6 +65,16 @@ Vec3 orbitPosition(const OrbitParams& o, double time, int chamber) {
                         std::sin(angle * 1.7f + o.phase) * o.bob * kChamberRadius * kStoneBobScale,
                         std::sin(angle) * o.orbitRadius * kChamberRadius * kStoneOrbitScale};
     return chamberCenter(chamber) + local;
+}
+
+// Where a stone sits once the walls are down. Each keeps its own phase around a small orbit
+// at the centre, so the six arrive as a milling cluster rather than a single stacked point.
+Vec3 impactPosition(const OrbitParams& o, double time, int chamber) {
+    const float angle = static_cast<float>(time) * 0.9f +
+                        static_cast<float>(chamber) * (6.28318531f / kChamberCount);
+    return {std::cos(angle) * kImpactOrbitRadius,
+            std::sin(angle * 1.4f + o.phase) * kImpactOrbitRadius * 0.45f,
+            std::sin(angle) * kImpactOrbitRadius};
 }
 
 // Soul: particles inside kCaptureRadius are held in a circular orbit instead of left to
@@ -357,9 +396,43 @@ Stones::Stones() {
     setVisual(m_stones[static_cast<size_t>(StoneKind::Time)], kTimeOutline, kTimeFacets);
 }
 
-void Stones::update(double time, float dt) {
+void Stones::update(double time, float dt, ParticleSystem& particles) {
+    const double inCycle = std::fmod(time, kCycleDuration);
+    const Phase previous = m_phase;
+
+    if (inCycle < kContainedDuration) {
+        m_phase = Phase::Contained;
+        m_gather = 0.0f;
+    } else if (inCycle < kContainedDuration + kConvergeDuration) {
+        m_phase = Phase::Converge;
+        m_gather = smoothstep01(
+            static_cast<float>((inCycle - kContainedDuration) / kConvergeDuration));
+    } else if (inCycle < kContainedDuration + kConvergeDuration + kImpactDuration) {
+        m_phase = Phase::Impact;
+        m_gather = 1.0f;
+    } else {
+        m_phase = Phase::Reform;
+        const double into =
+            inCycle - kContainedDuration - kConvergeDuration - kImpactDuration;
+        m_gather = 1.0f - smoothstep01(static_cast<float>(into / kReformDuration));
+    }
+
+    // Crossing into Reform is the one moment particles change owner. Doing it on the
+    // boundary rather than continuously means the re-sort happens once per cycle instead of
+    // every frame, and gives the reform phase a fixed target to pull each particle toward.
+    if (m_phase == Phase::Reform && previous != Phase::Reform) {
+        reassignChambers(particles);
+        ++m_cycleCount;
+    }
+
     for (size_t i = 0; i < m_stones.size(); ++i) {
-        m_stones[i].position = orbitPosition(kOrbits[i], time, static_cast<int>(i));
+        const Vec3 home = orbitPosition(kOrbits[i], time, static_cast<int>(i));
+        if (m_gather <= 0.0f) {
+            m_stones[i].position = home;
+        } else {
+            const Vec3 gathered = impactPosition(kOrbits[i], time, static_cast<int>(i));
+            m_stones[i].position = home + (gathered - home) * m_gather;
+        }
     }
 
     for (ShockFront& front : m_shockFronts) front.age += dt;
@@ -398,7 +471,11 @@ void Stones::update(double time, float dt) {
     // Both mouths are the same point mirrored through the chamber centre, so an entry
     // sitting on that centre puts them inside one another and a particle teleports into the
     // mouth it just left on every step. Push it off the centre first.
-    const Vec3 spaceHome = chamberCenter(static_cast<int>(StoneKind::Space));
+    // The mirror the exit is reflected through follows the stone in from its chamber, so
+    // the wormhole keeps working while the walls are down instead of flinging particles back
+    // to an empty globe.
+    const Vec3 chamberHome = chamberCenter(static_cast<int>(StoneKind::Space));
+    const Vec3 spaceHome = chamberHome + (Vec3{} - chamberHome) * m_gather;
     const Vec3 fromHome = space.position - spaceHome;
     const float homeDistance = length(fromHome);
     if (homeDistance < kSpaceMinOriginDistance) {
@@ -412,7 +489,8 @@ void Stones::update(double time, float dt) {
     // would emit particles into a region the integrator immediately clamps, pinning them
     // flat against the wall instead of letting them stream out of the ring. A whole mouth
     // radius of margin keeps the opening itself clear of the wall, not just its center.
-    const float reach = kChamberRadius - kSpacePortalRadius;
+    const float reach = (m_gather > 0.0f ? kImpactOrbitRadius + kChamberRadius * 0.4f
+                                         : kChamberRadius) - kSpacePortalRadius;
     const Vec3 offset = space.position - spaceHome;
     const float offsetLength = length(offset);
     if (offsetLength > reach) space.position = spaceHome + offset * (reach / offsetLength);
@@ -474,6 +552,8 @@ void Stones::recordHistory(const ParticleSystem& particles) {
 // chamber to one thread is the other partitioning, and the one expected to lose.
 
 void Stones::applyForces(ParticleSystem& particles, const SpatialGrid& grid, float dt) {
+    if (m_phase != Phase::Contained) applyMergeDrift(particles, dt);
+
     applySoul(particles, dt);
     applyPower(particles, dt);
     applySpace(particles, dt);
@@ -496,15 +576,94 @@ struct ChamberRange {
     int end;
 };
 
-inline ChamberRange rangeOf(const ParticleSystem& particles, StoneKind kind) {
+inline ChamberRange rangeOf(const ParticleSystem& particles, StoneKind kind, bool contained) {
+    // Walls down means ownership is suspended: every stone reaches every particle, so each
+    // of the six kernels runs the full array. Six times the work of a contained frame, which
+    // is why the merge and the contained phase have to be benchmarked separately rather than
+    // averaged into one number.
+    if (!contained) return {0, particles.count()};
     const int c = static_cast<int>(kind);
     return {particles.chamberBegin(c), particles.chamberEnd(c)};
 }
 
 }  // namespace
 
+// Nothing in a stone's own power moves the cloud between chambers, so the merge needs a
+// force of its own: inward while the stones gather, and out to each particle's newly
+// assigned chamber while they reform.
+void Stones::applyMergeDrift(ParticleSystem& particles, float dt) {
+    const int count = particles.count();
+    const bool reforming = m_phase == Phase::Reform;
+    const float strength = reforming ? kReformPull : kConvergePull;
+
+    Vec3 centers[kChamberCount];
+    for (int c = 0; c < kChamberCount; ++c) centers[c] = chamberCenter(c);
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = 0; i < count; ++i) {
+        const Vec3 pos = {particles.px[i], particles.py[i], particles.pz[i]};
+        // Reforming particles aim at spread points inside their globe, not all at its
+        // centre. Aiming every one at a single point packs them onto the inner wall and
+        // leaves the chamber visibly lopsided for most of the contained phase afterwards.
+        Vec3 target;
+        if (reforming) {
+            uint32_t h = hashCombine(m_cycleCount, static_cast<uint32_t>(i));
+            const float ox = randomSigned(h); h = hashU32(h);
+            const float oy = randomSigned(h); h = hashU32(h);
+            const float oz = randomSigned(h);
+            target = centers[particles.chamber[i]] +
+                     Vec3{ox, oy, oz} * (kChamberRadius * kReformSpread);
+        }
+
+        const Vec3 toTarget = target - pos;
+        const float distance = length(toTarget);
+        if (distance < 1e-4f) continue;
+
+        // Pull is capped rather than proportional to distance. Proportional would launch a
+        // particle on the far side of the ring at several times the speed of one already
+        // near the target, and the cloud would arrive as a shell rather than a stream.
+        const float reach = distance > 1.0f ? 1.0f : distance;
+        const Vec3 direction = toTarget * (1.0f / distance);
+
+        particles.vx[i] += direction.x * (strength * reach * dt);
+        particles.vy[i] += direction.y * (strength * reach * dt);
+        particles.vz[i] += direction.z * (strength * reach * dt);
+    }
+}
+
+// Every particle is handed to a new chamber at the moment the reform begins. Round robin by
+// index rather than nearest chamber: at this instant the whole cloud is bunched at the
+// centre, so nearest would hand most of it to whichever globe happened to be closest and
+// leave the rest nearly empty. Round robin keeps the six blocks equal, which keeps the per
+// chamber work equal, and it draws from every old chamber evenly so the colours genuinely
+// reshuffle instead of rotating as six intact blocks.
+void Stones::reassignChambers(ParticleSystem& particles) {
+    const int count = particles.count();
+
+    #pragma omp parallel for if(g_parallel) num_threads(g_threads) schedule(static)
+    for (int i = 0; i < count; ++i) {
+        const int owner = static_cast<int>(
+            (static_cast<uint32_t>(i) + m_cycleCount) % static_cast<uint32_t>(kChamberCount));
+        particles.chamber[i] = static_cast<uint8_t>(owner);
+        particles.cr[i] = kStoneColor[owner][0];
+        particles.cg[i] = kStoneColor[owner][1];
+        particles.cb[i] = kStoneColor[owner][2];
+        particles.captured[i] = 0;
+        particles.timeScale[i] = 1.0f;
+    }
+
+    particles.regroup();
+
+    // regroup permutes every array, so any index held outside ParticleSystem is now stale.
+    // The position history is exactly that, and reading it after this point would rewind
+    // particles onto paths that belonged to different particles.
+    m_historyFilled = 0;
+    m_historyCursor = 0;
+    m_historyStep = 0;
+}
+
 void Stones::applySoul(ParticleSystem& particles, float dt) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Soul);
+    const ChamberRange range = rangeOf(particles, StoneKind::Soul, m_phase == Phase::Contained);
     const Vec3 soulPos = stone(StoneKind::Soul).position;
     const float localDt = dt;
 
@@ -570,7 +729,7 @@ void Stones::applySoul(ParticleSystem& particles, float dt) {
 }
 
 void Stones::applyPower(ParticleSystem& particles, float dt) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Power);
+    const ChamberRange range = rangeOf(particles, StoneKind::Power, m_phase == Phase::Contained);
     const Vec3 powerPos = stone(StoneKind::Power).position;
     const int frontCount = static_cast<int>(m_shockFronts.size());
     const ShockFront* fronts = m_shockFronts.data();
@@ -604,7 +763,7 @@ void Stones::applyPower(ParticleSystem& particles, float dt) {
 }
 
 void Stones::applySpace(ParticleSystem& particles, float dt) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Space);
+    const ChamberRange range = rangeOf(particles, StoneKind::Space, m_phase == Phase::Contained);
     const Vec3 spaceEntry = stone(StoneKind::Space).position;
     const Vec3 spaceExit = m_spaceExit;
     const float localDt = dt;
@@ -681,7 +840,7 @@ void Stones::applySpace(ParticleSystem& particles, float dt) {
 // against, and drives the rewind. There is nothing to scale by dt here, which is why it is
 // the one kernel that does not take it.
 void Stones::applyTime(ParticleSystem& particles) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Time);
+    const ChamberRange range = rangeOf(particles, StoneKind::Time, m_phase == Phase::Contained);
     const Vec3 timePos = stone(StoneKind::Time).position;
     const int count = particles.count();
 
@@ -745,7 +904,7 @@ void Stones::applyTime(ParticleSystem& particles) {
 }
 
 void Stones::applyReality(ParticleSystem& particles, float dt) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Reality);
+    const ChamberRange range = rangeOf(particles, StoneKind::Reality, m_phase == Phase::Contained);
     const Vec3 realityPos = stone(StoneKind::Reality).position;
 
     // Twists about its own orbit tangent, so the axis sweeps as the stone travels and the
@@ -788,7 +947,7 @@ void Stones::applyReality(ParticleSystem& particles, float dt) {
 }
 
 void Stones::applyMind(ParticleSystem& particles, const SpatialGrid& grid, float dt) {
-    const ChamberRange range = rangeOf(particles, StoneKind::Mind);
+    const ChamberRange range = rangeOf(particles, StoneKind::Mind, m_phase == Phase::Contained);
     const Vec3 mindPos = stone(StoneKind::Mind).position;
     const int gridDim = grid.dim();
     const float localDt = dt;

@@ -57,6 +57,11 @@ float stoneShapeRadius(const Stone& stone, float angle);
 // irregular planes and bright seams; unfinished circular stones simply return 1.
 float stoneSurfaceLighting(const Stone& stone, float x, float y);
 
+// Where the ring is in its cycle. The chambers exist to make the six powers legible, but
+// sealed globes can never collide or snap, so the walls dissolve periodically and everything
+// converges on the centre before reforming.
+enum class Phase { Contained, Converge, Impact, Reform };
+
 // One expanding shockwave front spawned by the Power stone. Radius is derived from age
 // rather than stored, so aging every front is a single add with nothing else to keep in
 // sync.
@@ -73,7 +78,18 @@ public:
 
     // Advances stone positions and ages or spawns Power's shockwave fronts. Serial: six
     // bodies and a handful of shockwave fronts is negligible next to the particle loop.
-    void update(double time, float dt);
+    // Takes the particle system because the transition into Reform reassigns every particle
+    // to a new chamber and re-sorts them, which cannot be done from outside without leaking
+    // the phase boundary into the caller.
+    void update(double time, float dt, ParticleSystem& particles);
+
+    Phase phase() const { return m_phase; }
+
+    // 0 while the stones sit in their chambers, 1 while they are gathered at the centre.
+    // Drives stone positions, the camera push in, and whether forces are chamber local.
+    float gather() const { return m_gather; }
+
+    bool chamberWallsUp() const { return m_phase == Phase::Contained; }
 
     // Every stone's power applied to every particle in one pass. Parallel over particles:
     // an iteration only ever touches its own particle, plus two shared counters that are
@@ -89,6 +105,12 @@ private:
     void applyTime(ParticleSystem& particles);
     void applyReality(ParticleSystem& particles, float dt);
     void applyMind(ParticleSystem& particles, const SpatialGrid& grid, float dt);
+
+    // The pull that actually moves the cloud during a merge: toward the centre while the
+    // stones gather, toward each particle's newly assigned chamber while they reform.
+    void applyMergeDrift(ParticleSystem& particles, float dt);
+
+    void reassignChambers(ParticleSystem& particles);
 
 public:
     const Stone& stone(StoneKind kind) const { return m_stones[static_cast<size_t>(kind)]; }
@@ -138,6 +160,10 @@ private:
     int      m_spaceTeleportCount = 0;
     float    m_spaceActivity = 0.0f;
     float    m_spaceActivityTarget = 0.0f;
+
+    Phase  m_phase = Phase::Contained;
+    float  m_gather = 0.0f;
+    uint32_t m_cycleCount = 0;
 
     std::vector<float> m_historyX, m_historyY, m_historyZ;
     int  m_historyCount = 0;   // particles the ring is currently sized for

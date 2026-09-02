@@ -16,14 +16,14 @@ constexpr float kRestitution = 1.0f;
 // only flipped when it actually points outward: a particle already turning back inward,
 // which happens on the step after a bounce while it is still clamped to the surface, would
 // otherwise be flipped a second time and pinned to the wall.
-inline void confineToChamber(Vec3& position, Vec3& velocity, Vec3 center) {
+inline void confineToChamber(Vec3& position, Vec3& velocity, Vec3 center, float radius) {
     const Vec3 offset = position - center;
     const float distanceSq = lengthSq(offset);
-    if (distanceSq <= kChamberRadius * kChamberRadius) return;
+    if (distanceSq <= radius * radius) return;
 
     const float distance = std::sqrt(distanceSq);
     const Vec3 normal = offset * (1.0f / distance);
-    position = center + normal * kChamberRadius;
+    position = center + normal * radius;
 
     const float outward = dot(velocity, normal);
     if (outward > 0.0f) velocity -= normal * (outward * (1.0f + kRestitution));
@@ -127,7 +127,7 @@ void ParticleSystem::regroup() {
     for (int c = 0; c <= kChamberCount; ++c) m_chamberStart[c] = m_partition.rangeBegin(c);
 }
 
-void ParticleSystem::integrate(float dt) {
+void ParticleSystem::integrate(float dt, bool chamberWalls) {
     Vec3 centers[kChamberCount];
     for (int c = 0; c < kChamberCount; ++c) centers[c] = chamberCenter(c);
 
@@ -138,7 +138,11 @@ void ParticleSystem::integrate(float dt) {
         Vec3 position = {px[i] + vx[i] * step, py[i] + vy[i] * step, pz[i] + vz[i] * step};
         Vec3 velocity = {vx[i], vy[i], vz[i]};
 
-        confineToChamber(position, velocity, centers[chamber[i]]);
+        if (chamberWalls) {
+            confineToChamber(position, velocity, centers[chamber[i]], kChamberRadius);
+        } else {
+            confineToChamber(position, velocity, Vec3{}, kRingExtent);
+        }
 
         px[i] = position.x; py[i] = position.y; pz[i] = position.z;
         vx[i] = velocity.x; vy[i] = velocity.y; vz[i] = velocity.z;

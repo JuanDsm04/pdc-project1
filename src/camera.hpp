@@ -16,7 +16,9 @@ struct Projected {
 class Camera {
 public:
     void setViewport(int width, int height, float verticalFovDegrees = 60.0f);
-    void update(double time);
+    // gather is 0 with the stones in their chambers and 1 with them at the centre. The
+    // camera closes in as it rises so the merge fills the frame.
+    void update(double time, float gather);
 
     Projected project(Vec3 world) const;
 
